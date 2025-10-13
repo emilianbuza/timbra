@@ -1,7 +1,7 @@
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
-import { generateText } from "./openaiClient.js";
+import { generateText } from "./openaiclient.js";
 import { outboundSMSPrompt } from "./prompts.js";
 import { upsertLead, listLeads, setLeadStatus } from "./memoryStore.js";
 import { sendSMS, handleIncomingSMS } from "./twilioHandlers.js";
@@ -57,3 +57,4 @@ app.listen(PORT, () => {
   console.log(`✅ Atlas MVP running on :${PORT}`);
   console.log(`   Health: http://localhost:${PORT}/health`);
 });
+
