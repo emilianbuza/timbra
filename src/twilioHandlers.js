@@ -1,5 +1,5 @@
 import twilio from "twilio";
-import { generateText } from "./openaiClient.js";
+import { generateText } from "./openaiclient.js";
 import { inboundParsePrompt, followupConfirmSMS, followupAskTimeSMS, followupDeclineSMS } from "./prompts.js";
 import { getLeadByPhone, setLeadStatus } from "./memoryStore.js";
 import { createCalendarEvent } from "./calendar.js";
@@ -88,3 +88,4 @@ export async function handleIncomingSMS(req, res) {
     return res.type("text/xml").send("<Response></Response>");
   }
 }
+
