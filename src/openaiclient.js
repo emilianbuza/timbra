@@ -12,3 +12,4 @@ export async function generateText(prompt) {
   });
   return resp.choices[0]?.message?.content?.trim() || "";
 }
+
