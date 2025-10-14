@@ -1,4 +1,4 @@
-# Atlas MVP
+#Timbr AI MVP
 
 Lead → SMS in <60s → Antwortanalyse → Terminbuchung (Google Calendar)
 
@@ -17,3 +17,4 @@ Lead → SMS in <60s → Antwortanalyse → Terminbuchung (Google Calendar)
     "phone": "+4915123456789",
     "service": "Webdesign"
   }
+
