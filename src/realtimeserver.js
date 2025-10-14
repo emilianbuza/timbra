@@ -1,24 +1,27 @@
 import WebSocket, { WebSocketServer } from "ws";
-import axios from "axios";
-import FormData from "form-data";
-import fs from "fs";
-import path from "path";
+import dotenv from "dotenv";
 import { createCalendarEvent } from "./calendar.js";
+dotenv.config();
 
-// === OpenAI Realtime Verbindung ===
 const OPENAI_MODEL =
   process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// === WebSocket-Server starten ===
+/**
+ * Realtime-Server: verbindet Twilio Voice Streams mit OpenAI GPT-4 Realtime.
+ *  - Hört auf /media-stream
+ *  - Versteht Audio (deutsch)
+ *  - Spricht mit natürlicher Stimme zurück
+ *  - Kann automatisch Termine im Kalender anlegen
+ */
 export function initRealtimeServer(server) {
-  const wss = new WebSocketServer({ server, path: "/realtime" });
-  console.log("🔊 Realtime WebSocket bereit auf /realtime");
+  const wss = new WebSocketServer({ server, path: "/media-stream" });
+  console.log("🎧 Realtime-Server wartet auf Twilio-Streams...");
 
-  wss.on("connection", async (ws, req) => {
-    console.log("📞 Neue Twilio-Verbindung eingegangen");
+  wss.on("connection", async (ws) => {
+    console.log("📞 Neuer Twilio-Stream verbunden");
 
-    // === OpenAI Realtime Session starten ===
+    // === Verbindung zur OpenAI Realtime-API herstellen ===
     const openaiWs = new WebSocket(
       `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`,
       {
@@ -29,103 +32,96 @@ export function initRealtimeServer(server) {
       }
     );
 
-    // === Wenn Verbindung zu OpenAI steht ===
+    // === Wenn Realtime-Session aktiv ist ===
     openaiWs.on("open", () => {
-      console.log("🧠 OpenAI-Realtime verbunden – Session aktiv");
+      console.log("🧠 Verbunden mit OpenAI Realtime API");
 
-      // Systemrolle, Stimme und Tools konfigurieren
+      // Konfiguration der Stimme und Systemrolle
       openaiWs.send(
         JSON.stringify({
-          type: "session.update",
-          session: {
-            // 🎙️ Stimmeinstellungen
-            voice: "verse",
-            voice_profile: "de_female_warm",
-            modulation: {
-              pitch: -0.2, // tiefer, seriöser
-              rate: -0.05, // minimal langsamer
-              energy: -0.1 // weichere Aussprache
-            },
-            gain: 0.85, // etwas leiser für Twilio-Kompression
-            audio: {
-              filter: { high_cut: 5500 } // entfernt metallische Höhen
-            },
-
-            // 🧭 Verhaltensbeschreibung
+          type: "response.create",
+          response: {
             instructions: `
               Du bist die freundliche, empathische Praxisassistenz der Praxis Dr. Emilian Buza.
               Sprich natürlich, ruhig und mit leichtem Lächeln in der Stimme.
-              Begrüße Anrufer mit einem kurzen, herzlichen Satz – wie eine echte Person.
-              Beispielbegrüßung: "Guten Tag, Praxis Dr. Emilian Buza, was kann ich für Sie tun?"
-              Wenn der Anrufer einen Termin nennt, frage bei Unklarheiten freundlich nach.
-              Wenn Datum und Uhrzeit klar sind, nutze das Tool 'book_appointment'.
-              Beende Gespräche höflich: "Alles klar, ich trage den Termin ein. Einen schönen Tag Ihnen noch!"
+              Begrüße Anrufer mit einem kurzen, herzlichen Satz.
+              Beispiel: "Guten Tag, Praxis Dr. Emilian Buza, was kann ich für Sie tun?"
+              Wenn jemand einen Termin möchte, frage nach Datum und Uhrzeit.
+              Wenn Datum und Uhrzeit klar sind, bestätige höflich:
+              "Perfekt, ich trage das gleich ein." 
+              Sprich auf Deutsch.
             `,
-
-            // 🧰 Tools
-            tools: [
-              {
-                name: "book_appointment",
-                type: "function",
-                description: "Buche einen Arzttermin im Kalender",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    name: { type: "string" },
-                    dateTimeStart: { type: "string" },
-                    dateTimeEnd: { type: "string" }
-                  },
-                  required: ["name", "dateTimeStart", "dateTimeEnd"]
-                }
+            modalities: ["text", "audio"],
+            audio: {
+              voice: "verse",                 // warme, natürlich klingende Stimme
+              format: "wav",
+              language: "de",
+              gain: 0.85,
+              filter: { high_cut: 5500 },     // weniger metallisch
+              modulation: {
+                pitch: -0.2,
+                rate: -0.05,
+                energy: -0.1
               }
-            ]
-          }
+            },
+          },
         })
       );
     });
 
-    // === Twilio → OpenAI: Audio- und Textdaten weiterleiten ===
-    ws.on("message", (msg) => {
-      if (openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.send(msg);
+    // === Twilio → OpenAI: eingehende Audioframes weiterleiten ===
+    ws.on("message", (raw) => {
+      try {
+        const data = JSON.parse(raw.toString());
+
+        // Twilio sendet Base64-Frames im "media"-Event
+        if (data.event === "media") {
+          openaiWs.send(
+            JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: data.media.payload,
+            })
+          );
+        }
+
+        // Wenn der Stream endet
+        if (data.event === "stop") {
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+          openaiWs.send(JSON.stringify({ type: "response.create" }));
+        }
+      } catch (err) {
+        console.warn("⚠️ Ungültiges JSON von Twilio:", err);
       }
     });
 
-    // === OpenAI → Twilio: Antworten & Funktionsaufrufe ===
-    openaiWs.on("message", (msg) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(msg);
-      }
-
+    // === OpenAI → Twilio: Audioantworten zurücksenden ===
+    openaiWs.on("message", (raw) => {
       try {
-        const data = JSON.parse(msg.toString());
+        const msg = JSON.parse(raw.toString());
 
-        // Textausgabe (Debug-Log)
-        if (data.type === "response.output_text.delta" && data.delta) {
-          console.log("💬", data.delta);
+        // Audiodaten in Richtung Twilio streamen
+        if (msg.type === "response.output_audio.delta") {
+          ws.send(
+            JSON.stringify({
+              event: "media",
+              media: { payload: msg.delta },
+            })
+          );
         }
 
-        // Funktionsaufruf "book_appointment"
-        if (
-          data.type === "response.function_call_arguments.delta" &&
-          data.delta
-        ) {
-          let args;
-          try {
-            args = JSON.parse(data.delta);
-          } catch (e) {
-            console.warn("⚠️ Ungültige Funktionsargumente:", data.delta);
-            return;
-          }
+        // Debug-Textausgabe im Log
+        if (msg.type === "response.output_text.delta" && msg.delta) {
+          console.log("💬", msg.delta);
 
-          if (args.dateTimeStart) {
-            console.log("📆 Buche Termin:", args);
+          // Optionale Kalenderintegration bei erkannten Schlüsselwörtern
+          const lower = msg.delta.toLowerCase();
+          if (lower.includes("termin") && lower.includes("buchen")) {
+            console.log("📅 Termin erkannt – trage in Kalender ein...");
 
             createCalendarEvent({
-              summary: args.name || "Patient",
-              description: "Termin via Timbra AI",
-              startISO: args.dateTimeStart,
-              attendees: [],
+              summary: "Neuer Patiententermin",
+              description: "Automatisch über Sprachassistent erstellt",
+              startISO: new Date().toISOString(),
             })
               .then(() => console.log("✅ Termin erfolgreich eingetragen"))
               .catch((err) =>
@@ -134,16 +130,16 @@ export function initRealtimeServer(server) {
           }
         }
       } catch {
-        // kein valides JSON → ignorieren
+        // nicht parsebares JSON → ignorieren
       }
     });
 
-    // === Verbindungstrennung behandeln ===
+    // === Aufräumen bei Disconnects ===
     ws.on("close", () => {
-      console.log("🔚 Twilio getrennt");
+      console.log("❌ Twilio-Stream getrennt");
       openaiWs.close();
     });
 
-    openaiWs.on("close", () => console.log("🔚 OpenAI getrennt"));
+    openaiWs.on("close", () => console.log("🔚 OpenAI-Session beendet"));
   });
 }
