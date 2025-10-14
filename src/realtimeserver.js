@@ -151,10 +151,10 @@ export function initRealtimeServer(server) {
           modalities: ["text", "audio"],
           voice: "alloy",
           
-          // KONSERVATIVE VAD für Zuverlässigkeit
+          // OPTIMIERTE VAD - Höherer Threshold um Echo zu vermeiden
           turn_detection: {
             type: "server_vad",
-            threshold: 0.5,
+            threshold: 0.6,              // Erhöht um False Positives zu reduzieren
             prefix_padding_ms: 300,
             silence_duration_ms: 1200,
           },
@@ -262,6 +262,13 @@ export function initRealtimeServer(server) {
         lastResponseStart = Date.now();
         dbg.log('response_start', { responseId: msg.response?.id });
         dbg.metrics.responsesGenerated++;
+        
+        // KRITISCH: Clear input buffer um Echo/Feedback zu vermeiden
+        if (openaiWs.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "input_audio_buffer.clear"
+          }));
+        }
       }
 
       if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
@@ -301,27 +308,53 @@ export function initRealtimeServer(server) {
           chunks_sent: dbg.metrics.audioChunksSent
         });
 
+        // DEBUG: Log die KOMPLETTE Response-Struktur
+        dbg.log('response_structure', { 
+          response: JSON.stringify(msg.response).substring(0, 500)
+        });
+
+        // Mehrere Wege den Text zu extrahieren
+        let text = "";
+        
+        // Weg 1: Über output array
         if (msg.response?.output) {
-          const text = msg.response.output
+          text = msg.response.output
             .filter(item => item.type === "message")
             .flatMap(item => item.content || [])
             .filter(c => c.type === "text")
             .map(c => c.text)
             .join(" ");
+        }
+        
+        // Weg 2: Direkt aus response
+        if (!text && msg.response?.text) {
+          text = msg.response.text;
+        }
+        
+        // Weg 3: Aus content array
+        if (!text && msg.response?.content) {
+          text = msg.response.content
+            .filter(c => c.type === "text")
+            .map(c => c.text)
+            .join(" ");
+        }
 
-          dbg.log('response_text', { text: text.substring(0, 200) });
+        dbg.log('response_text', { 
+          text: text.substring(0, 200),
+          length: text.length,
+          found_via: text ? "success" : "EMPTY"
+        });
 
-          if (text.toLowerCase().includes("termin")) {
-            dbg.log('appointment_keyword_detected');
-            createCalendarEvent({
-              summary: "Neuer Patiententermin (Telefon)",
-              description: `Call: ${callId}\n\n${text}`,
-              startISO: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-            }).catch(err => {
-              dbg.metrics.errors.push(`Calendar: ${err.message}`);
-              dbg.log('error', { type: 'calendar', message: err.message });
-            });
-          }
+        if (text && text.toLowerCase().includes("termin")) {
+          dbg.log('appointment_keyword_detected');
+          createCalendarEvent({
+            summary: "Neuer Patiententermin (Telefon)",
+            description: `Call: ${callId}\n\n${text}`,
+            startISO: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          }).catch(err => {
+            dbg.metrics.errors.push(`Calendar: ${err.message}`);
+            dbg.log('error', { type: 'calendar', message: err.message });
+          });
         }
       }
 
