@@ -21,6 +21,12 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
+// Request Logger - zeigt ALLE eingehenden Requests
+app.use((req, res, next) => {
+  console.log(`📨 ${req.method} ${req.path} from ${req.ip}`);
+  next();
+});
+
 // === Healthcheck ===
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -47,24 +53,39 @@ app.post("/api/new-lead", async (req, res) => {
 app.post("/webhooks/sms", handleIncomingSMS);
 
 // === Twilio Voice Webhook (eingehender Anruf) ===
-// KRITISCHER FIX: track="inbound" verhindert Echo
 app.post("/webhooks/voice", (req, res) => {
-  console.log("📞 Eingehender Anruf:", req.body.From || "unbekannt");
+  try {
+    const from = req.body.From || "unbekannt";
+    const callSid = req.body.CallSid || "unknown";
+    
+    console.log("📞 Eingehender Anruf:", from);
+    console.log("🔍 Call SID:", callSid);
+    console.log("🔍 Request Body:", JSON.stringify(req.body).substring(0, 300));
 
-  // BASE_URL z. B. https://timbra-ai.onrender.com
-  const baseUrl =
-    process.env.BASE_URL?.replace(/^https?:\/\//, "") ||
-    "timbra-ai.onrender.com";
+    const baseUrl =
+      process.env.BASE_URL?.replace(/^https?:\/\//, "") ||
+      "timbra-ai.onrender.com";
 
-  // TwiML mit track="inbound" - sendet NUR User-Audio, NICHT AI-Output!
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    console.log("🔍 WebSocket URL:", `wss://${baseUrl}/media-stream`);
+
+    // TwiML - teste erst OHNE track Parameter
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://${baseUrl}/media-stream" track="inbound" />
+    <Stream url="wss://${baseUrl}/media-stream" />
   </Connect>
 </Response>`;
 
-  res.status(200).type("text/xml").send(twiml);
+    console.log("📤 Sending TwiML:", twiml);
+    
+    res.status(200).type("text/xml").send(twiml);
+    
+    console.log("✅ TwiML Response sent successfully");
+  } catch (err) {
+    console.error("❌ Voice webhook error:", err.message);
+    console.error("❌ Stack:", err.stack);
+    res.status(500).type("text/xml").send('<Response><Say>Error occurred</Say></Response>');
+  }
 });
 
 // === Übersicht aller Leads ===
@@ -72,6 +93,20 @@ app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
 
 // === Token-Route MUSS NACH den spezifischen Routes kommen! ===
 app.use("/", tokenRoute);
+
+// === 404 Handler - zeigt nicht gefundene Routes ===
+app.use((req, res, next) => {
+  console.error(`❌ 404 Not Found: ${req.method} ${req.path}`);
+  console.error(`❌ Available routes should include: /webhooks/voice, /webhooks/sms, /api/leads, /health`);
+  res.status(404).json({ error: "Not Found", path: req.path });
+});
+
+// === Error Handler ===
+app.use((err, req, res, next) => {
+  console.error("❌ Global Error Handler:", err.message);
+  console.error("❌ Stack:", err.stack);
+  res.status(500).json({ error: "Internal Server Error" });
+});
 
 // === client.html ausliefern (Test-Frontend für Browser-Calls) ===
 const __filename = fileURLToPath(import.meta.url);
@@ -89,15 +124,3 @@ server.listen(process.env.PORT || 10000, () => {
   console.log(`✅ Timbra AI läuft auf Port ${process.env.PORT || 10000}`);
   console.log("🎧 Warte auf Twilio-Voice-Streams unter /media-stream");
 });
-
-
-
-
-
-
-
-
-
-
-
-
