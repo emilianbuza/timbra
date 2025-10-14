@@ -7,6 +7,10 @@
 
     <!-- ⚡ Neue Twilio Voice SDK (v2.9.1) -->
     <script src="https://sdk.twilio.com/js/voice/releases/2.9.1/twilio-voice.min.js"></script>
+    <script>
+      // Sicherstellen, dass globaler Alias existiert
+      window.Twilio = window.TwilioVoice;
+    </script>
 
     <style>
       body {
@@ -43,7 +47,8 @@
           const data = await res.json();
           const token = data.token;
 
-          const device = new TwilioVoice.Device(token, {
+          // Twilio.Device aus globalem Namespace (nach Alias)
+          const device = new Twilio.Device(token, {
             codecPreferences: ["opus", "pcmu"],
             debug: true,
           });
@@ -70,11 +75,12 @@
           });
         } catch (err) {
           alert("Fehler beim Initialisieren: " + err.message);
+          console.error(err);
         }
       }
 
-      init();
+      // Warten bis SDK wirklich geladen ist
+      window.addEventListener("load", init);
     </script>
   </body>
 </html>
-
