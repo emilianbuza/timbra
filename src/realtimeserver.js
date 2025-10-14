@@ -4,7 +4,7 @@ import { createCalendarEvent } from "./calendar.js";
 dotenv.config();
 
 const OPENAI_MODEL =
-  process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-10-01";
+  process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 /**
