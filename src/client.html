@@ -43,7 +43,7 @@
           const data = await res.json();
           const token = data.token;
 
-          const device = new Twilio.Device(token, {
+          const device = new TwilioVoice.Device(token, {
             codecPreferences: ["opus", "pcmu"],
             debug: true,
           });
@@ -77,3 +77,4 @@
     </script>
   </body>
 </html>
+
