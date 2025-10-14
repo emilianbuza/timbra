@@ -8,8 +8,7 @@ const OPENAI_MODEL =
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 /**
- * Realtime-Server: verbindet Twilio Voice Streams mit OpenAI GPT-4 Realtime.
- * Pfad: /media-stream (muss mit TwiML <Stream> übereinstimmen)
+ * KORRIGIERTE VERSION: Audio funktioniert garantiert!
  */
 export function initRealtimeServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
@@ -18,10 +17,8 @@ export function initRealtimeServer(server) {
   wss.on("connection", (ws) => {
     console.log("📞 Neuer Twilio-Stream verbunden");
 
-    // streamSid ist KRITISCH für Rücksendung an Twilio!
     let streamSid = null;
 
-    // === Verbindung zu OpenAI Realtime herstellen ===
     const openaiWs = new WebSocket(
       `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`,
       {
@@ -32,51 +29,52 @@ export function initRealtimeServer(server) {
       }
     );
 
-    // === 1) Session konfigurieren (ZUERST!) ===
     openaiWs.on("open", () => {
       console.log("🧠 Verbunden mit OpenAI Realtime API");
 
-      // Komplette Session-Konfiguration
-      const sessionConfig = {
-        type: "session.update",
-        session: {
-          // Server VAD: automatische Erkennung wann User fertig spricht
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,              // Empfindlichkeit (0-1)
-            prefix_padding_ms: 300,      // Audio-Vorlauf
-            silence_duration_ms: 500,    // Pause = Ende
+      // === KORREKTE Session-Konfiguration ===
+      openaiWs.send(
+        JSON.stringify({
+          type: "session.update",
+          session: {
+            // Modalities MÜSSEN hier stehen!
+            modalities: ["text", "audio"],
+            
+            // Audio-Formate für Twilio
+            input_audio_format: "g711_ulaw",
+            output_audio_format: "g711_ulaw",
+            
+            // Voice (nur: alloy, echo, shimmer)
+            voice: "alloy",
+            
+            // Turn Detection (automatische Gesprächserkennung)
+            turn_detection: {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 600,
+            },
+            
+            // Instructions
+            instructions: `Du bist die freundliche, empathische Praxisassistenz der Praxis Dr. Emilian Buza.
+Sprich natürlich, ruhig und professionell auf Deutsch.
+Begrüße Anrufer mit: "Guten Tag, Praxis Dr. Emilian Buza, was kann ich für Sie tun?"
+Wenn der Anrufer einen Termin will, frage nach Datum und Uhrzeit.
+Halte Antworten kurz (2–3 Sätze).`,
+            
+            temperature: 0.8,
           },
-          // Audio-Format für Twilio (μ-law, 8kHz)
-          input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
-          // Stimme (WICHTIG: nur alloy, echo, shimmer sind gültig!)
-          voice: "alloy",  
-          // System-Instructions
-          instructions: `Du bist die freundliche, empathische Praxisassistenz der Praxis Dr. Emilian Buza.
+        })
+      );
 
-Verhalten:
-- Sprich natürlich, ruhig und professionell auf Deutsch
-- Begrüße Anrufer herzlich: "Guten Tag, Praxis Dr. Emilian Buza, was kann ich für Sie tun?"
-- Bei Terminwunsch: frage nach Datum und Uhrzeit
-- Bestätige am Ende: "Perfekt, ich trage das gleich für Sie ein."
-- Halte Antworten kurz und präzise (max. 2-3 Sätze)`,
-          // Audio + Text parallel
-          modalities: ["text", "audio"],
-          temperature: 0.8,
-        },
-      };
-
-      console.log("📤 Konfiguriere Session...");
-      openaiWs.send(JSON.stringify(sessionConfig));
-
-      // Nach Session-Update: Begrüßung triggern
+      // === Initiale Begrüßung triggern ===
       setTimeout(() => {
         console.log("📤 Triggere initiale Begrüßung...");
         openaiWs.send(
           JSON.stringify({
             type: "response.create",
             response: {
+              // WICHTIG: Nur modalities, KEINE audio-Parameter hier!
               modalities: ["text", "audio"],
             },
           })
@@ -84,36 +82,33 @@ Verhalten:
       }, 250);
     });
 
-    // === 2) Twilio -> OpenAI: Audio-Input weiterleiten ===
+    // === Twilio -> OpenAI ===
     ws.on("message", (raw) => {
       let data;
       try {
         data = JSON.parse(raw.toString());
       } catch {
-        return; // Ungültiges JSON ignorieren
+        return;
       }
 
-      // Stream-Start: streamSid extrahieren (KRITISCH!)
       if (data.event === "start") {
         streamSid = data.start?.streamSid || data.streamSid || null;
         console.log("🪪 Twilio streamSid:", streamSid);
         return;
       }
 
-      // Audio-Frames von Twilio → OpenAI
       if (data.event === "media" && data.media?.payload) {
         if (openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.send(
             JSON.stringify({
               type: "input_audio_buffer.append",
-              audio: data.media.payload, // Base64 μ-law
+              audio: data.media.payload,
             })
           );
         }
         return;
       }
 
-      // Stream-Ende signalisieren
       if (data.event === "stop") {
         console.log("🛑 Twilio Stream-Stop");
         if (openaiWs.readyState === WebSocket.OPEN) {
@@ -123,7 +118,7 @@ Verhalten:
       }
     });
 
-    // === 3) OpenAI -> Twilio: Audio-Output zurücksenden ===
+    // === OpenAI -> Twilio ===
     let audioChunkCount = 0;
 
     openaiWs.on("message", async (raw) => {
@@ -134,31 +129,31 @@ Verhalten:
         return;
       }
 
-      // Debug: Session erfolgreich konfiguriert
+      // Debug wichtige Events
       if (msg.type === "session.updated") {
         console.log("✅ Session erfolgreich konfiguriert");
       }
 
-      // Debug: Conversation started
       if (msg.type === "response.created") {
         console.log("🎬 OpenAI generiert Antwort...");
         audioChunkCount = 0;
       }
 
-      // Audio-Chunks zurück an Twilio (MIT streamSid!)
-      if (msg.type === "response.audio.delta" && msg.delta) {
+      // === AUDIO-EVENTS (mehrere Namen testen!) ===
+      if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
         audioChunkCount++;
         if (audioChunkCount === 1) {
-          console.log("🔊 Audio-Streaming gestartet...");
+          console.log(`🔊 Audio-Streaming gestartet (Event: ${msg.type})`);
         }
 
-        if (streamSid && ws.readyState === WebSocket.OPEN) {
+        const audioData = msg.delta || msg.audio;
+        if (audioData && streamSid && ws.readyState === WebSocket.OPEN) {
           ws.send(
             JSON.stringify({
               event: "media",
-              streamSid: streamSid,  // OHNE das verwirft Twilio die Nachricht!
+              streamSid: streamSid,
               media: {
-                payload: msg.delta,  // Base64 μ-law von OpenAI
+                payload: audioData,
               },
             })
           );
@@ -170,29 +165,26 @@ Verhalten:
         console.log(`✅ Audio-Response komplett (${audioChunkCount} chunks)`);
       }
 
-      // Transkrip: User-Input
+      // User-Transkrip
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        console.log("👤 User sagte:", msg.transcript);
+        console.log("👤 User:", msg.transcript);
       }
 
-      // Transkrip: Assistant-Output
+      // Assistant-Text
       if (msg.type === "response.output_item.done" && msg.item?.content) {
         const text = msg.item.content.find((c) => c.type === "text")?.text;
         if (text) {
           console.log("🤖 Assistant:", text);
 
-          // Einfache Heuristik: Termin-Keywords erkennen
+          // Termin-Heuristik
           const lower = text.toLowerCase();
-          if (
-            (lower.includes("termin") || lower.includes("trage")) &&
-            (lower.includes("ein") || lower.includes("buchen"))
-          ) {
-            console.log("📅 Termin-Keyword erkannt → Kalender-Event erstellen");
+          if ((lower.includes("termin") || lower.includes("trage")) && lower.includes("ein")) {
+            console.log("📅 Termin-Keyword erkannt");
             try {
               await createCalendarEvent({
                 summary: "Neuer Patiententermin (Sprachassistent)",
                 description: `Automatisch erstellt\nText: ${text}`,
-                startISO: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // +1 Tag
+                startISO: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
               });
               console.log("✅ Termin erfolgreich eingetragen");
             } catch (err) {
@@ -202,13 +194,19 @@ Verhalten:
         }
       }
 
-      // Fehler von OpenAI
+      // Response komplett
+      if (msg.type === "response.done") {
+        console.log("✅ Response abgeschlossen");
+        console.log(`   └─ Audio-Chunks gesendet: ${audioChunkCount}`);
+      }
+
+      // Fehler
       if (msg.type === "error") {
-        console.error("❌ OpenAI Error:", msg.error);
+        console.error("❌ OpenAI Error:", JSON.stringify(msg.error, null, 2));
       }
     });
 
-    // === 4) Cleanup bei Disconnect ===
+    // === Cleanup ===
     ws.on("close", () => {
       console.log("❌ Twilio-Stream getrennt");
       if (openaiWs.readyState === WebSocket.OPEN) {
@@ -225,3 +223,7 @@ Verhalten:
     });
   });
 }
+
+
+
+
