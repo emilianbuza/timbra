@@ -140,12 +140,10 @@ export function initRealtimeServer(server) {
         console.log("🎬 Response gestartet");
       }
 
-      // KRITISCH: Audio-Events - ALLE MÖGLICHEN NAMEN!
+      // KRITISCH: Audio-Events - NUR DIE ECHTEN AUDIO-EVENTS!
       if (
         (msg.type === "response.audio.delta" ||
-         msg.type === "response.output_audio.delta" ||
-         msg.type === "audio.delta" ||
-         msg.type === "response.audio_transcript.delta") &&
+         msg.type === "response.output_audio.delta") &&
         msg.delta
       ) {
         audioChunkCount++;
