@@ -47,8 +47,9 @@ export function initRealtimeServer(server) {
     let speechEndTimer = null;
 
     const MAX_BUFFER_CHUNKS = 150;
-    const SILENCE_MS = 1200;
-    const MIN_CHUNKS = 50;
+    const SILENCE_MS = 1500;
+    const MIN_CHUNKS = 60;
+    const VOICE_THRESHOLD = 150;
 
     const metrics = {
       sessionId,
@@ -60,6 +61,7 @@ export function initRealtimeServer(server) {
       transcriptionAttempts: 0,
       transcriptionsReceived: 0,
       emptyTranscriptions: 0,
+      vadRejections: 0,
       bufferOverflows: 0,
       silenceTriggers: 0,
       groqWhisperRequests: 0,
@@ -98,17 +100,45 @@ export function initRealtimeServer(server) {
         'twilio': '📞',
         'audio': '🔉',
         'transcript': '📝',
-        'buffer': '💾'
+        'buffer': '💾',
+        'vad': '🎙️'
       }[type] || '•';
 
       console.log(`${emoji} [${timestamp}ms] ${message}`, data ? JSON.stringify(data).substring(0, 300) : '');
+    }
+
+    function hasVoiceActivity(audioData) {
+      const pcmData = new Int16Array(audioData.length);
+      
+      for (let i = 0; i < audioData.length; i++) {
+        const mulaw = audioData[i];
+        const sign = (mulaw & 0x80) >> 7;
+        const magnitude = (mulaw & 0x7F);
+        let sample = magnitude << 3;
+        sample += 0x84;
+        sample <<= (magnitude >> 4);
+        sample -= 0x84;
+        if (sign === 1) sample = -sample;
+        pcmData[i] = sample;
+      }
+      
+      let sum = 0;
+      for (let i = 0; i < pcmData.length; i++) {
+        sum += Math.abs(pcmData[i]);
+      }
+      const avgAmplitude = sum / pcmData.length;
+      
+      return avgAmplitude > VOICE_THRESHOLD;
     }
 
     function isJunkTranscription(text) {
       const junk = [
         'vielen dank',
         'danke',
+        'das war\'s',
+        'das wars',
         '...',
+        '.',
         'oh',
         'ah',
         'mhm',
@@ -116,7 +146,8 @@ export function initRealtimeServer(server) {
         'ard text',
         'untertitel',
         'im auftrag',
-        'applaus'
+        'applaus',
+        'damit'
       ];
       const lower = text.toLowerCase().trim();
       return junk.some(j => lower === j || (lower.includes(j) && text.length < 20));
@@ -159,6 +190,15 @@ export function initRealtimeServer(server) {
         bufferChunks: bufferChunks,
         durationSeconds: (audioData.length / 8000).toFixed(2)
       });
+
+      if (!hasVoiceActivity(audioData)) {
+        metrics.vadRejections++;
+        log('vad', `Kein Voice Activity detected - skip (Total: ${metrics.vadRejections})`);
+        isProcessing = false;
+        return;
+      }
+
+      log('vad', 'Voice Activity detected ✓');
 
       try {
         const wavBuffer = convertMulawToWav(audioData);
@@ -254,12 +294,24 @@ export function initRealtimeServer(server) {
           messages: [
             {
               role: "system",
-              content: `Du bist Lea von Praxis Dr. Buza.
-Begrüße: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?'
-Bei Terminwunsch: Frage nach Datum UND Uhrzeit.
-Wenn Patient vage antwortet: Frage konkret nach Datum (z.B. "Welcher Tag passt Ihnen - Montag, Dienstag?").
-Wenn Patient sich verabschiedet: Sage "Auf Wiederhören" und beende höflich.
-Antworte sehr kurz (max 1-2 Sätze).`,
+              content: `Du bist Lea, freundliche Assistentin von Praxis Dr. Buza.
+
+BEGRÜSSUNG:
+- "Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?"
+
+TERMINBUCHUNG:
+- Frage IMMER nach Datum UND Uhrzeit
+- Wenn Patient vage antwortet: Frage konkret ("Welcher Tag - Montag oder Dienstag?")
+- Bestätige Termine klar: "Notiert: Montag 14 Uhr. Bis dann!"
+
+VERABSCHIEDUNG:
+- NUR verabschieden wenn Patient EXPLIZIT sagt: "Tschüss", "Auf Wiedersehen", "Danke, das wars, Tschüss" 
+- Bei unklaren Aussagen wie "Das war's" oder "OK" → NICHT auflegen, sondern NACHFRAGEN: "Kann ich sonst noch etwas für Sie tun?"
+
+WICHTIG:
+- Antworte SEHR kurz (max 1-2 Sätze)
+- Sei geduldig und frag nach wenn unklar
+- Leg NIEMALS einfach auf ohne klare Verabschiedung`,
             },
             ...conversationHistory,
           ],
@@ -334,8 +386,15 @@ Antworte sehr kurz (max 1-2 Sätze).`,
         const estimatedPlaybackMs = (audioData.length / 8) + 500;
         speechEndTimer = setTimeout(() => {
           isSpeaking = false;
-          audioBuffer = [];
           log('info', 'Bot finished speaking');
+          
+          if (audioBuffer.length >= MIN_CHUNKS) {
+            silenceTimer = setTimeout(() => {
+              if (!isSpeaking && audioBuffer.length >= MIN_CHUNKS) {
+                transcribeAudio('silence');
+              }
+            }, SILENCE_MS);
+          }
         }, estimatedPlaybackMs);
 
       } catch (error) {
@@ -467,7 +526,7 @@ Antworte sehr kurz (max 1-2 Sätze).`,
       console.log(`Duration: ${(duration/1000).toFixed(1)}s`);
       console.log(`Audio In: ${metrics.audioChunksReceived} chunks`);
       console.log(`Audio Out: ${metrics.audioChunksSentToTwilio} chunks`);
-      console.log(`Transcriptions: ${metrics.transcriptionsReceived} valid, ${metrics.emptyTranscriptions} ignored`);
+      console.log(`Transcriptions: ${metrics.transcriptionsReceived} valid, ${metrics.emptyTranscriptions} ignored, ${metrics.vadRejections} VAD rejected`);
       console.log(`Chat: ${metrics.groqChatResponses} responses`);
       console.log(`TTS: ${metrics.ttsResponses} responses`);
       if (metrics.errors.length > 0) {
