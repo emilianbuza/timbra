@@ -41,11 +41,14 @@ export function initRealtimeServer(server) {
     let streamSid = null;
     let conversationHistory = [];
     let isProcessing = false;
+    let isSpeaking = false;
     let audioBuffer = [];
     let silenceTimer = null;
+    let speechEndTimer = null;
 
     const MAX_BUFFER_CHUNKS = 150;
-    const SILENCE_MS = 800;
+    const SILENCE_MS = 1200;
+    const MIN_CHUNKS = 50;
 
     const metrics = {
       sessionId,
@@ -101,6 +104,23 @@ export function initRealtimeServer(server) {
       console.log(`${emoji} [${timestamp}ms] ${message}`, data ? JSON.stringify(data).substring(0, 300) : '');
     }
 
+    function isJunkTranscription(text) {
+      const junk = [
+        'vielen dank',
+        'danke',
+        '...',
+        'oh',
+        'ah',
+        'mhm',
+        'hm',
+        'ard text',
+        'untertitel',
+        'im auftrag'
+      ];
+      const lower = text.toLowerCase().trim();
+      return junk.some(j => lower === j || (lower.includes(j) && text.length < 20));
+    }
+
     async function transcribeAudio(trigger) {
       if (audioBuffer.length === 0) {
         log('warning', 'Transcribe Skip: Empty Buffer');
@@ -108,10 +128,18 @@ export function initRealtimeServer(server) {
       }
 
       if (isProcessing) {
-        log('warning', 'Transcribe Skip: Already Processing', {
-          bufferChunks: audioBuffer.length,
-          trigger
-        });
+        log('warning', 'Transcribe Skip: Already Processing');
+        return;
+      }
+
+      if (isSpeaking) {
+        log('warning', 'Transcribe Skip: Bot is speaking');
+        audioBuffer = [];
+        return;
+      }
+
+      if (audioBuffer.length < MIN_CHUNKS) {
+        log('warning', 'Buffer zu klein', { chunks: audioBuffer.length, min: MIN_CHUNKS });
         return;
       }
 
@@ -125,19 +153,16 @@ export function initRealtimeServer(server) {
       const bufferChunks = audioBuffer.length;
       audioBuffer = [];
       
-      log('whisper', `Transcription Attempt #${metrics.transcriptionAttempts} (${trigger})`, {
+      log('whisper', `Transcription #${metrics.transcriptionAttempts} (${trigger})`, {
         audioBytes: audioData.length,
         bufferChunks: bufferChunks,
         durationSeconds: (audioData.length / 8000).toFixed(2)
       });
 
       try {
-        log('whisper', 'Konvertiere μ-law zu WAV...');
         const wavBuffer = convertMulawToWav(audioData);
-        log('success', 'WAV erstellt', { wavBytes: wavBuffer.length });
 
         metrics.groqWhisperRequests++;
-        log('whisper', `Groq Whisper Request #${metrics.groqWhisperRequests}...`);
         
         const whisperStart = Date.now();
         const transcription = await groq.audio.transcriptions.create({
@@ -152,18 +177,15 @@ export function initRealtimeServer(server) {
 
         const text = typeof transcription === 'string' ? transcription.trim() : '';
         
-        log('whisper', `Whisper Response #${metrics.groqWhisperResponses} (${whisperLatency}ms)`, {
-          textLength: text.length,
-          text: text.substring(0, 100)
-        });
+        log('whisper', `Whisper #${metrics.groqWhisperResponses} (${whisperLatency}ms)`, { text });
         
-        if (text && text.length > 0) {
+        if (text && text.length > 2 && !isJunkTranscription(text)) {
           metrics.transcriptionsReceived++;
-          log('transcript', `Valid Transcription #${metrics.transcriptionsReceived}: "${text}"`);
+          log('transcript', `Valid #${metrics.transcriptionsReceived}: "${text}"`);
           await handleUserInput(text);
         } else {
           metrics.emptyTranscriptions++;
-          log('warning', `Leere Transkription (Total: ${metrics.emptyTranscriptions})`);
+          log('warning', `Ignoriert: "${text}"`);
         }
 
       } catch (error) {
@@ -171,25 +193,15 @@ export function initRealtimeServer(server) {
         metrics.errors.push({ 
           time: Date.now() - startTime, 
           component: 'groq_whisper', 
-          error: error.message,
-          status: error.status,
-          type: error.type
+          error: error.message
         });
-        log('error', 'Whisper Error:', { 
-          message: error.message,
-          status: error.status,
-          type: error.type,
-          stack: error.stack?.substring(0, 200)
-        });
+        log('error', 'Whisper Error:', { message: error.message });
       } finally {
         isProcessing = false;
-        log('info', 'Processing Lock Released');
       }
     }
 
     function convertMulawToWav(mulawData) {
-      log('info', 'μ-law → PCM Conversion...', { inputBytes: mulawData.length });
-      
       const pcmData = new Int16Array(mulawData.length);
       
       for (let i = 0; i < mulawData.length; i++) {
@@ -222,31 +234,17 @@ export function initRealtimeServer(server) {
       wavHeader.write('data', 36);
       wavHeader.writeUInt32LE(dataLength, 40);
 
-      log('success', 'WAV Header erstellt', { 
-        sampleRate: 8000,
-        channels: 1,
-        bitsPerSample: 16,
-        dataLength: dataLength
-      });
-
       return Buffer.concat([wavHeader, Buffer.from(pcmData.buffer)]);
     }
 
     async function handleUserInput(userText) {
       metrics.groqChatRequests++;
-      log('groq', `Chat Request #${metrics.groqChatRequests} für: "${userText}"`);
+      log('groq', `Chat #${metrics.groqChatRequests}: "${userText}"`);
 
       try {
         conversationHistory.push({
           role: "user",
           content: userText,
-        });
-
-        log('groq', 'Sende an Groq Chat...', {
-          model: "llama-3.3-70b-versatile",
-          historyLength: conversationHistory.length,
-          temperature: 0.7,
-          maxTokens: 150
         });
 
         const groqStart = Date.now();
@@ -255,27 +253,24 @@ export function initRealtimeServer(server) {
           messages: [
             {
               role: "system",
-              content: `Du bist Lea, Assistentin von Praxis Dr. Buza. 
-Begrüße freundlich: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?'
-Bei Terminfragen: Erfrage Datum UND Uhrzeit. Bestätige klar.
-Bei unklaren Antworten: Frage höflich nach.
-Lege nur auf wenn Patient sich klar verabschiedet.
-Antworte kurz und präzise (max 2 Sätze).`,
+              content: `Du bist Lea von Praxis Dr. Buza.
+Begrüße: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?'
+Bei Terminwunsch: Frage nach Datum UND Uhrzeit.
+Wenn Patient vage antwortet: Frage konkret nach Datum (z.B. "Welcher Tag passt Ihnen - Montag, Dienstag?").
+Wenn Patient sich verabschiedet: Sage "Auf Wiederhören" und beende höflich.
+Antworte sehr kurz (max 1-2 Sätze).`,
             },
             ...conversationHistory,
           ],
           temperature: 0.7,
-          max_tokens: 150,
+          max_tokens: 100,
         });
 
         const groqLatency = Date.now() - groqStart;
         const responseText = completion.choices[0]?.message?.content || "";
 
         metrics.groqChatResponses++;
-        log('success', `Chat Response #${metrics.groqChatResponses} (${groqLatency}ms): "${responseText}"`, {
-          finishReason: completion.choices[0]?.finish_reason,
-          tokensUsed: completion.usage
-        });
+        log('success', `Chat #${metrics.groqChatResponses} (${groqLatency}ms): "${responseText}"`);
 
         conversationHistory.push({
           role: "assistant",
@@ -291,29 +286,23 @@ Antworte kurz und präzise (max 2 Sätze).`,
           component: 'groq_chat', 
           error: error.message 
         });
-        log('error', 'Groq Chat Error:', {
-          message: error.message,
-          status: error.status,
-          type: error.type,
-          stack: error.stack?.substring(0, 200)
-        });
+        log('error', 'Groq Chat Error:', { message: error.message });
       }
     }
 
     async function generateSpeech(text) {
       metrics.ttsRequests++;
-      log('elevenlabs', `TTS Request #${metrics.ttsRequests} für: "${text.substring(0, 50)}..."`);
+      log('elevenlabs', `TTS #${metrics.ttsRequests}: "${text.substring(0, 50)}..."`);
+
+      isSpeaking = true;
+      audioBuffer = [];
+
+      if (silenceTimer) clearTimeout(silenceTimer);
+      if (speechEndTimer) clearTimeout(speechEndTimer);
 
       const ttsStart = Date.now();
 
       try {
-        log('elevenlabs', 'Sende an ElevenLabs...', {
-          voiceId: 'pNInz6obpgDQGcFmaJgB',
-          model: 'eleven_turbo_v2',
-          format: 'ulaw_8000',
-          textLength: text.length
-        });
-
         const audioStream = await elevenlabs.textToSpeech.convert(
           "pNInz6obpgDQGcFmaJgB",
           {
@@ -323,53 +312,44 @@ Antworte kurz und präzise (max 2 Sätze).`,
           }
         );
 
-        log('success', 'ElevenLabs Stream erhalten');
-
         let audioData = Buffer.alloc(0);
         let chunkCount = 0;
         
         for await (const chunk of audioStream) {
           audioData = Buffer.concat([audioData, chunk]);
           chunkCount++;
-          
-          if (chunkCount === 1) {
-            log('audio', 'Erstes TTS-Chunk', { bytes: chunk.length });
-          }
         }
 
         const ttsLatency = Date.now() - ttsStart;
         metrics.ttsResponses++;
         
-        log('success', `TTS Response #${metrics.ttsResponses} (${ttsLatency}ms)`, {
+        log('success', `TTS #${metrics.ttsResponses} (${ttsLatency}ms)`, {
           totalBytes: audioData.length,
-          chunks: chunkCount,
-          avgChunkSize: Math.round(audioData.length / chunkCount)
+          chunks: chunkCount
         });
 
         sendAudioToTwilio(audioData);
 
+        const estimatedPlaybackMs = (audioData.length / 8) + 500;
+        speechEndTimer = setTimeout(() => {
+          isSpeaking = false;
+          audioBuffer = [];
+          log('info', 'Bot finished speaking');
+        }, estimatedPlaybackMs);
+
       } catch (error) {
         metrics.ttsErrors++;
+        isSpeaking = false;
         metrics.errors.push({ 
           time: Date.now() - startTime, 
           component: 'elevenlabs', 
           error: error.message 
         });
-        log('error', 'ElevenLabs Error:', {
-          message: error.message,
-          name: error.name,
-          status: error.status,
-          stack: error.stack?.substring(0, 200)
-        });
+        log('error', 'ElevenLabs Error:', { message: error.message });
       }
     }
 
     function sendAudioToTwilio(audioBuffer) {
-      log('twilio', 'Sende Audio...', {
-        totalBytes: audioBuffer.length,
-        streamSid: streamSid
-      });
-      
       const chunkSize = 160;
       let offset = 0;
       let chunks = 0;
@@ -394,17 +374,12 @@ Antworte kurz und präzise (max 2 Sätze).`,
           chunks++;
           offset += chunkSize;
         } catch (err) {
-          metrics.errors.push({ 
-            time: Date.now() - startTime, 
-            component: 'twilio_send', 
-            error: err.message 
-          });
-          log('error', 'Twilio Send Error:', { message: err.message });
+          log('error', 'Send Error:', { message: err.message });
           break;
         }
       }
 
-      log('success', `Audio gesendet: ${chunks} chunks, ${audioBuffer.length} bytes`);
+      log('success', `Sent ${chunks} chunks`);
     }
 
     twilioWs.on("message", async (message) => {
@@ -416,177 +391,79 @@ Antworte kurz und präzise (max 2 Sätze).`,
           streamSid = msg.start.streamSid;
           metrics.twilioConnected = true;
           
-          log('twilio', 'Stream Start', {
-            callId,
-            streamSid,
-            tracks: msg.start.tracks,
-            mediaFormat: msg.start.mediaFormat
-          });
+          log('twilio', 'Stream Start', { callId, streamSid });
 
           setTimeout(() => {
-            log('info', 'Triggere Begrüßung...');
             handleUserInput("Hallo");
-          }, 1000);
+          }, 800);
         }
 
         if (msg.event === "media") {
           metrics.audioChunksReceived++;
           const audioPayload = Buffer.from(msg.media.payload, "base64");
+
+          if (isSpeaking) {
+            return;
+          }
           
           audioBuffer.push(audioPayload);
           metrics.audioBufferSize += audioPayload.length;
           metrics.audioBufferChunks = audioBuffer.length;
 
-          if (metrics.audioChunksReceived === 1) {
-            log('audio', 'Erstes Audio von Twilio', {
-              bytes: audioPayload.length,
-              timestamp: msg.media.timestamp
-            });
-          }
-
-          // BUFFER OVERFLOW PROTECTION
           if (audioBuffer.length >= MAX_BUFFER_CHUNKS && !isProcessing) {
-            log('buffer', '⚠️ BUFFER OVERFLOW TRIGGER!', {
-              chunks: audioBuffer.length,
-              maxChunks: MAX_BUFFER_CHUNKS,
-              bytes: metrics.audioBufferSize
-            });
-            
+            log('buffer', 'OVERFLOW', { chunks: audioBuffer.length });
             if (silenceTimer) clearTimeout(silenceTimer);
             transcribeAudio('overflow');
             return;
           }
 
-          // SILENCE DETECTION
           if (silenceTimer) clearTimeout(silenceTimer);
           
           silenceTimer = setTimeout(() => {
-            log('buffer', 'Silence detected - triggering transcription', {
-              bufferChunks: audioBuffer.length,
-              bufferBytes: metrics.audioBufferSize
-            });
-            
-            if (audioBuffer.length > 40) {
+            if (!isSpeaking && audioBuffer.length >= MIN_CHUNKS) {
               transcribeAudio('silence');
-            } else {
-              log('warning', 'Buffer zu klein für Transkription', {
-                chunks: audioBuffer.length,
-                minRequired: 40
-              });
             }
           }, SILENCE_MS);
-
-          if (metrics.audioChunksReceived % 100 === 0) {
-            log('info', 'Audio Progress', {
-              chunksReceived: metrics.audioChunksReceived,
-              bufferChunks: audioBuffer.length,
-              bufferBytes: metrics.audioBufferSize,
-              transcriptions: metrics.transcriptionsReceived
-            });
-          }
         }
 
         if (msg.event === "stop") {
-          log('twilio', 'Stream Stop Event');
+          log('twilio', 'Stream Stop');
           if (silenceTimer) clearTimeout(silenceTimer);
+          if (speechEndTimer) clearTimeout(speechEndTimer);
         }
 
       } catch (err) {
-        metrics.errors.push({ 
-          time: Date.now() - startTime, 
-          component: 'message_handler', 
-          error: err.message 
-        });
-        log('error', 'Message Handler Error:', { 
-          message: err.message, 
-          stack: err.stack?.substring(0, 200)
-        });
+        log('error', 'Message Error:', { message: err.message });
       }
     });
 
     twilioWs.on("close", () => {
       log('twilio', 'WebSocket Closed');
       if (silenceTimer) clearTimeout(silenceTimer);
+      if (speechEndTimer) clearTimeout(speechEndTimer);
       printDebugReport();
     });
 
     twilioWs.on("error", (err) => {
-      metrics.errors.push({ 
-        time: Date.now() - startTime, 
-        component: 'websocket', 
-        error: err.message 
-      });
-      log('error', 'WebSocket Error:', { 
-        message: err.message, 
-        stack: err.stack?.substring(0, 200)
-      });
+      log('error', 'WebSocket Error:', { message: err.message });
     });
 
     function printDebugReport() {
       const duration = Date.now() - startTime;
       
       console.log("\n" + "=".repeat(80));
-      console.log(`📊 DEBUG REPORT - Session ${sessionId.substring(0, 8)}`);
+      console.log(`📊 DEBUG - Session ${sessionId.substring(0, 8)}`);
       console.log("=".repeat(80));
-      
-      console.log("\n🔌 CONNECTION:");
-      console.log(`  Twilio: ${metrics.twilioConnected ? '✅' : '❌'}`);
-      
-      console.log("\n🎤 AUDIO FLOW:");
-      console.log(`  Twilio → Server: ${metrics.audioChunksReceived} chunks`);
-      console.log(`  Buffer Size: ${metrics.audioBufferSize} bytes`);
-      console.log(`  Server → Twilio: ${metrics.audioChunksSentToTwilio} chunks (${metrics.audioBytesSentToTwilio} bytes)`);
-      
-      console.log("\n📝 TRANSCRIPTION:");
-      console.log(`  Whisper Requests: ${metrics.groqWhisperRequests}`);
-      console.log(`  Whisper Responses: ${metrics.groqWhisperResponses}`);
-      console.log(`  Whisper Errors: ${metrics.groqWhisperErrors}`);
-      console.log(`  Valid Transcriptions: ${metrics.transcriptionsReceived}`);
-      console.log(`  Empty Transcriptions: ${metrics.emptyTranscriptions}`);
-      console.log(`  Silence Triggers: ${metrics.silenceTriggers}`);
-      console.log(`  Buffer Overflows: ${metrics.bufferOverflows}`);
-      
-      console.log("\n🧠 GROQ CHAT:");
-      console.log(`  Requests: ${metrics.groqChatRequests}`);
-      console.log(`  Responses: ${metrics.groqChatResponses}`);
-      console.log(`  Errors: ${metrics.groqChatErrors}`);
-      
-      console.log("\n🔊 TTS:");
-      console.log(`  Requests: ${metrics.ttsRequests}`);
-      console.log(`  Responses: ${metrics.ttsResponses}`);
-      console.log(`  Errors: ${metrics.ttsErrors}`);
-      
-      console.log("\n⏱️ TIMING:");
-      console.log(`  Total Duration: ${duration}ms (${(duration/1000).toFixed(1)}s)`);
-      
+      console.log(`Duration: ${(duration/1000).toFixed(1)}s`);
+      console.log(`Audio In: ${metrics.audioChunksReceived} chunks`);
+      console.log(`Audio Out: ${metrics.audioChunksSentToTwilio} chunks`);
+      console.log(`Transcriptions: ${metrics.transcriptionsReceived} valid, ${metrics.emptyTranscriptions} ignored`);
+      console.log(`Chat: ${metrics.groqChatResponses} responses`);
+      console.log(`TTS: ${metrics.ttsResponses} responses`);
       if (metrics.errors.length > 0) {
-        console.log("\n❌ ERRORS:");
-        metrics.errors.forEach(err => {
-          console.log(`  [${err.time}ms] ${err.component}: ${err.error}`);
-        });
+        console.log(`Errors: ${metrics.errors.length}`);
       }
-      
-      console.log("\n📋 CRITICAL CHECKS:");
-      if (metrics.audioChunksReceived === 0) {
-        console.log("  ⛔ KEINE Audio von Twilio!");
-      }
-      if (metrics.groqWhisperRequests === 0) {
-        console.log("  ⛔ KEINE Whisper Requests!");
-      }
-      if (metrics.transcriptionsReceived === 0) {
-        console.log("  ⛔ KEINE validen Transkriptionen!");
-      }
-      if (metrics.groqChatResponses === 0) {
-        console.log("  ⛔ KEINE Chat Responses!");
-      }
-      if (metrics.ttsResponses === 0) {
-        console.log("  ⛔ KEINE TTS Responses!");
-      }
-      if (metrics.audioChunksSentToTwilio === 0) {
-        console.log("  ⛔ KEIN Audio an Twilio gesendet!");
-      }
-      
-      console.log("\n" + "=".repeat(80) + "\n");
+      console.log("=".repeat(80) + "\n");
     }
   });
 }
