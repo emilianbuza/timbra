@@ -7,7 +7,7 @@ const OPENAI_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-previ
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 /**
- * DEBUG VERSION - Zeigt ALLES was passiert
+ * DEBUG VERSION mit funktionierendem Variablennamen
  */
 
 class CallDebugger {
@@ -33,7 +33,6 @@ class CallDebugger {
     };
     this.timeline.push(entry);
     
-    // Console Output mit Emoji + Zeit
     const emoji = this.getEmoji(event);
     console.log(`${emoji} [${timestamp}ms] ${event}`, JSON.stringify(data));
   }
@@ -53,7 +52,16 @@ class CallDebugger {
       'error': '❌',
       'warning': '⚠️',
       'performance': '⏱️',
-      'call_end': '🔚'
+      'call_end': '🔚',
+      'openai_connected': '🧠',
+      'stream_started': '🪪',
+      'stream_stopped': '🛑',
+      'audio_chunks_received': '⬇️',
+      'audio_part_added': '📦',
+      'response_text': '💬',
+      'appointment_keyword_detected': '📅',
+      'rate_limits': '🚦',
+      'openai_disconnected': '🔌'
     };
     return emojiMap[event] || '📌';
   }
@@ -105,11 +113,6 @@ class CallDebugger {
       this.metrics.errors.forEach(err => console.log(`    - ${err}`));
     }
     
-    console.log('\n📋 TIMELINE:');
-    this.timeline.forEach(entry => {
-      console.log(`  ${entry.time}ms: ${entry.event}`);
-    });
-    
     console.log('\n' + '='.repeat(60) + '\n');
   }
 }
@@ -120,8 +123,8 @@ export function initRealtimeServer(server) {
 
   wss.on("connection", (ws) => {
     const callId = `call_${Date.now()}`;
-    const debugger = new CallDebugger(callId);
-    debugger.log('call_start', { callId });
+    const dbg = new CallDebugger(callId);  // FIXED: dbg statt debugger
+    dbg.log('call_start', { callId });
 
     let streamSid = null;
     let lastResponseStart = null;
@@ -138,9 +141,8 @@ export function initRealtimeServer(server) {
     );
 
     openaiWs.on("open", () => {
-      debugger.log('openai_connected');
+      dbg.log('openai_connected');
 
-      // Session Config mit allen Details geloggt
       const sessionConfig = {
         type: "session.update",
         session: {
@@ -148,22 +150,27 @@ export function initRealtimeServer(server) {
           output_audio_format: "g711_ulaw",
           modalities: ["text", "audio"],
           voice: "alloy",
+          
+          // KONSERVATIVE VAD für Zuverlässigkeit
           turn_detection: {
             type: "server_vad",
             threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: 1200,
           },
+          
           instructions: "Du bist Lea von Praxis Dr. Buza. Begrüße kurz: 'Guten Tag, Praxis Dr. Buza, was kann ich tun?' Antworte kurz (max 2 Sätze). Bei Termin: frage Datum + Uhrzeit.",
+          
           temperature: 0.7,
           max_response_output_tokens: 150,
+          
           input_audio_transcription: {
             model: "whisper-1"
           },
         },
       };
       
-      debugger.log('session_config_sent', { 
+      dbg.log('session_config_sent', { 
         vad_threshold: sessionConfig.session.turn_detection.threshold,
         vad_silence_ms: sessionConfig.session.turn_detection.silence_duration_ms,
         temperature: sessionConfig.session.temperature
@@ -172,7 +179,7 @@ export function initRealtimeServer(server) {
       openaiWs.send(JSON.stringify(sessionConfig));
 
       setTimeout(() => {
-        debugger.log('greeting_triggered');
+        dbg.log('greeting_triggered');
         openaiWs.send(JSON.stringify({
           type: "response.create",
           response: { modalities: ["text", "audio"] },
@@ -191,17 +198,16 @@ export function initRealtimeServer(server) {
 
       if (data.event === "start") {
         streamSid = data.start?.streamSid || data.streamSid || null;
-        debugger.log('stream_started', { streamSid });
+        dbg.log('stream_started', { streamSid });
         return;
       }
 
       if (data.event === "media" && data.media?.payload) {
-        debugger.metrics.audioChunksReceived++;
+        dbg.metrics.audioChunksReceived++;
         
-        // Log nur jeden 100. Chunk um nicht zu spammen
-        if (debugger.metrics.audioChunksReceived % 100 === 0) {
-          debugger.log('audio_chunks_received', { 
-            total: debugger.metrics.audioChunksReceived 
+        if (dbg.metrics.audioChunksReceived % 100 === 0) {
+          dbg.log('audio_chunks_received', { 
+            total: dbg.metrics.audioChunksReceived 
           });
         }
         
@@ -215,7 +221,7 @@ export function initRealtimeServer(server) {
       }
 
       if (data.event === "stop") {
-        debugger.log('stream_stopped');
+        dbg.log('stream_stopped');
         if (openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
         }
@@ -232,52 +238,46 @@ export function initRealtimeServer(server) {
         return;
       }
 
-      // Session configured
       if (msg.type === "session.updated") {
-        debugger.log('session_configured');
+        dbg.log('session_configured');
       }
 
-      // Speech detection
       if (msg.type === "input_audio_buffer.speech_started") {
         lastSpeechStart = Date.now();
-        debugger.log('user_speech_start');
-        debugger.metrics.userSpeechDetected++;
+        dbg.log('user_speech_start');
+        dbg.metrics.userSpeechDetected++;
       }
 
       if (msg.type === "input_audio_buffer.speech_stopped") {
         const duration = lastSpeechStart ? Date.now() - lastSpeechStart : null;
-        debugger.log('user_speech_end', { duration_ms: duration });
+        dbg.log('user_speech_end', { duration_ms: duration });
       }
 
-      // Transcription
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const transcript = msg.transcript || "";
-        debugger.log('transcription', { text: transcript });
+        dbg.log('transcription', { text: transcript });
       }
 
-      // Response lifecycle
       if (msg.type === "response.created") {
         lastResponseStart = Date.now();
-        debugger.log('response_start', { responseId: msg.response?.id });
-        debugger.metrics.responsesGenerated++;
+        dbg.log('response_start', { responseId: msg.response?.id });
+        dbg.metrics.responsesGenerated++;
       }
 
-      // Audio output
       if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
-        debugger.metrics.audioChunksSent++;
+        dbg.metrics.audioChunksSent++;
         
-        if (debugger.metrics.audioChunksSent === 1) {
+        if (dbg.metrics.audioChunksSent === 1) {
           const latency = lastResponseStart ? Date.now() - lastResponseStart : null;
-          debugger.log('audio_start', { 
+          dbg.log('audio_start', { 
             latency_ms: latency,
             event_type: msg.type 
           });
         }
         
-        // Log nur jeden 50. Chunk
-        if (debugger.metrics.audioChunksSent % 50 === 0) {
-          debugger.log('audio_chunk', { 
-            total_sent: debugger.metrics.audioChunksSent 
+        if (dbg.metrics.audioChunksSent % 50 === 0) {
+          dbg.log('audio_chunk', { 
+            total_sent: dbg.metrics.audioChunksSent 
           });
         }
 
@@ -291,18 +291,16 @@ export function initRealtimeServer(server) {
       }
 
       if (msg.type === "response.content_part.added" && msg.part?.type === "audio") {
-        debugger.log('audio_part_added');
+        dbg.log('audio_part_added');
       }
 
-      // Response complete
       if (msg.type === "response.done") {
         const duration = lastResponseStart ? Date.now() - lastResponseStart : null;
-        debugger.log('response_end', { 
+        dbg.log('response_end', { 
           duration_ms: duration,
-          chunks_sent: debugger.metrics.audioChunksSent
+          chunks_sent: dbg.metrics.audioChunksSent
         });
 
-        // Termin-Erkennung
         if (msg.response?.output) {
           const text = msg.response.output
             .filter(item => item.type === "message")
@@ -311,36 +309,34 @@ export function initRealtimeServer(server) {
             .map(c => c.text)
             .join(" ");
 
-          debugger.log('response_text', { text: text.substring(0, 200) });
+          dbg.log('response_text', { text: text.substring(0, 200) });
 
           if (text.toLowerCase().includes("termin")) {
-            debugger.log('appointment_keyword_detected');
+            dbg.log('appointment_keyword_detected');
             createCalendarEvent({
               summary: "Neuer Patiententermin (Telefon)",
               description: `Call: ${callId}\n\n${text}`,
               startISO: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
             }).catch(err => {
-              debugger.metrics.errors.push(`Calendar: ${err.message}`);
-              debugger.log('error', { type: 'calendar', message: err.message });
+              dbg.metrics.errors.push(`Calendar: ${err.message}`);
+              dbg.log('error', { type: 'calendar', message: err.message });
             });
           }
         }
       }
 
-      // Errors
       if (msg.type === "error") {
         if (msg.error?.code !== "input_audio_buffer_commit_empty") {
-          debugger.metrics.errors.push(`${msg.error?.code}: ${msg.error?.message}`);
-          debugger.log('error', { 
+          dbg.metrics.errors.push(`${msg.error?.code}: ${msg.error?.message}`);
+          dbg.log('error', { 
             code: msg.error?.code, 
             message: msg.error?.message 
           });
         }
       }
 
-      // Rate limits
       if (msg.type === "rate_limits.updated") {
-        debugger.log('rate_limits', { 
+        dbg.log('rate_limits', { 
           limits: msg.rate_limits 
         });
       }
@@ -348,8 +344,8 @@ export function initRealtimeServer(server) {
 
     // === Cleanup ===
     ws.on("close", () => {
-      debugger.log('call_end');
-      debugger.generateReport();
+      dbg.log('call_end');
+      dbg.generateReport(); 
       
       if (openaiWs.readyState === WebSocket.OPEN) {
         openaiWs.close();
@@ -357,12 +353,12 @@ export function initRealtimeServer(server) {
     });
 
     openaiWs.on("close", () => {
-      debugger.log('openai_disconnected');
+      dbg.log('openai_disconnected');
     });
 
     openaiWs.on("error", (err) => {
-      debugger.metrics.errors.push(`WebSocket: ${err.message}`);
-      debugger.log('error', { type: 'websocket', message: err.message });
+      dbg.metrics.errors.push(`WebSocket: ${err.message}`);
+      dbg.log('error', { type: 'websocket', message: err.message });
     });
   });
 }
