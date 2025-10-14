@@ -85,11 +85,11 @@ export function initRealtimeServer(server) {
           const args = JSON.parse(data.delta);
           if (args.dateTimeStart) {
             console.log("📆 Buche Termin:", args);
-            insertEvent({
-              summary: args.name || "Patient",
-              start: args.dateTimeStart,
-              end: args.dateTimeEnd,
-              description: "Termin via Timbra AI"
+         createCalendarEvent({
+  summary: args.name || "Patient",
+  description: "Termin via Timbra AI",
+  startISO: args.dateTimeStart,
+  attendees: [],
             }).then(() => console.log("✅ Termin eingetragen"));
           }
         }
@@ -105,4 +105,5 @@ export function initRealtimeServer(server) {
     openaiWs.on("close", () => console.log("🔚 OpenAI getrennt"));
   });
 }
+
 
