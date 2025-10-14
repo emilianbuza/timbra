@@ -6,10 +6,11 @@ import path from "path";
 import { createCalendarEvent } from "./calendar.js";
 
 // === OpenAI Realtime Verbindung ===
-const OPENAI_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
+const OPENAI_MODEL =
+  process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// Starte WebSocket-Server
+// === WebSocket-Server starten ===
 export function initRealtimeServer(server) {
   const wss = new WebSocketServer({ server, path: "/realtime" });
   console.log("🔊 Realtime WebSocket bereit auf /realtime");
@@ -17,20 +18,21 @@ export function initRealtimeServer(server) {
   wss.on("connection", async (ws, req) => {
     console.log("📞 Neue Twilio-Verbindung");
 
-    // OpenAI Realtime Session
+    // === OpenAI Realtime Session starten ===
     const openaiWs = new WebSocket(
       `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`,
       {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "realtime=v1"
-        }
+          "OpenAI-Beta": "realtime=v1",
+        },
       }
     );
 
     openaiWs.on("open", () => {
       console.log("🧠 OpenAI-Realtime verbunden");
-      // Systemrolle: Praxis Dr. Emilian Buza
+
+      // Systemrolle & Tools definieren
       openaiWs.send(
         JSON.stringify({
           type: "session.update",
@@ -52,25 +54,25 @@ export function initRealtimeServer(server) {
                   properties: {
                     name: { type: "string" },
                     dateTimeStart: { type: "string" },
-                    dateTimeEnd: { type: "string" }
+                    dateTimeEnd: { type: "string" },
                   },
-                  required: ["name", "dateTimeStart", "dateTimeEnd"]
-                }
-              }
-            ]
-          }
+                  required: ["name", "dateTimeStart", "dateTimeEnd"],
+                },
+              },
+            ],
+          },
         })
       );
     });
 
-    // Weiterleiten Twilio→OpenAI
+    // === Weiterleiten Twilio → OpenAI ===
     ws.on("message", (msg) => {
       if (openaiWs.readyState === WebSocket.OPEN) {
         openaiWs.send(msg);
       }
     });
 
-    // Weiterleiten OpenAI→Twilio
+    // === Weiterleiten OpenAI → Twilio ===
     openaiWs.on("message", (msg) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(msg);
@@ -78,23 +80,29 @@ export function initRealtimeServer(server) {
 
       try {
         const data = JSON.parse(msg.toString());
+
         if (data.type === "response.output_text.delta") {
           console.log("💬", data.delta);
         }
-        if (data.type === "response.function_call_arguments.delta" && data.delta) {
+
+        // Wenn OpenAI eine Terminbuchung triggert
+        if (
+          data.type === "response.function_call_arguments.delta" &&
+          data.delta
+        ) {
           const args = JSON.parse(data.delta);
           if (args.dateTimeStart) {
             console.log("📆 Buche Termin:", args);
-         createCalendarEvent({
-  summary: args.name || "Patient",
-  description: "Termin via Timbra AI",
-  startISO: args.dateTimeStart,
-  attendees: [],
+            createCalendarEvent({
+              summary: args.name || "Patient",
+              description: "Termin via Timbra AI",
+              startISO: args.dateTimeStart,
+              attendees: [],
             }).then(() => console.log("✅ Termin eingetragen"));
           }
         }
       } catch (e) {
-        // ignore
+        // Fehler stillschweigend ignorieren (WebSocket Noise)
       }
     });
 
@@ -102,8 +110,7 @@ export function initRealtimeServer(server) {
       console.log("🔚 Twilio getrennt");
       openaiWs.close();
     });
+
     openaiWs.on("close", () => console.log("🔚 OpenAI getrennt"));
   });
 }
-
-
