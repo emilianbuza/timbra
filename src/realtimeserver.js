@@ -8,7 +8,7 @@ const OPENAI_MODEL =
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 /**
- * PRODUCTION FIXED: Schnell + funktioniert garantiert!
+ * FIXED: streamSid-Extraktion repariert!
  */
 export function initRealtimeServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
@@ -18,6 +18,7 @@ export function initRealtimeServer(server) {
     console.log("📞 Neuer Twilio-Stream verbunden");
 
     let streamSid = null;
+    let audioChunkCount = 0;
 
     const openaiWs = new WebSocket(
       `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`,
@@ -32,7 +33,7 @@ export function initRealtimeServer(server) {
     openaiWs.on("open", () => {
       console.log("🧠 Verbunden mit OpenAI Realtime API");
 
-      // Speed-optimierte Session-Konfiguration
+      // Session-Konfiguration
       openaiWs.send(
         JSON.stringify({
           type: "session.update",
@@ -45,7 +46,7 @@ export function initRealtimeServer(server) {
               type: "server_vad",
               threshold: 0.5,
               prefix_padding_ms: 300,
-              silence_duration_ms: 200,  // ⚡ Schnell!
+              silence_duration_ms: 500,
             },
             instructions: "Du bist Lea von Praxis Dr. Buza. Sprich Deutsch, kurz und freundlich. Begrüße mit: 'Praxis Dr. Buza, guten Tag!'",
             temperature: 0.7,
@@ -66,21 +67,30 @@ export function initRealtimeServer(server) {
       }, 100);
     });
 
-    // === Twilio -> OpenAI ===
+    // === Twilio -> OpenAI (FIXED streamSid extraction!) ===
     ws.on("message", (raw) => {
       let data;
       try {
         data = JSON.parse(raw.toString());
-      } catch {
+      } catch (e) {
+        console.warn("⚠️ Ungültiges JSON von Twilio:", e.message);
         return;
       }
 
+      // KRITISCH: streamSid extrahieren! Twilio sendet es im "start" event
       if (data.event === "start") {
+        // Twilio kann es in verschiedenen Feldern senden:
         streamSid = data.start?.streamSid || data.streamSid || null;
-        console.log("🪪 streamSid:", streamSid);
+        console.log("🪪 streamSid empfangen:", streamSid);
+        
+        if (!streamSid) {
+          console.error("❌ WARNUNG: Kein streamSid gefunden im start event!");
+          console.log("Start event data:", JSON.stringify(data, null, 2));
+        }
         return;
       }
 
+      // Audio-Frames von Twilio → OpenAI
       if (data.event === "media" && data.media?.payload) {
         if (openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.send(
@@ -93,7 +103,9 @@ export function initRealtimeServer(server) {
         return;
       }
 
+      // Stream-Ende
       if (data.event === "stop") {
+        console.log("🛑 Twilio Stream-Stop");
         if (openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
         }
@@ -102,9 +114,6 @@ export function initRealtimeServer(server) {
     });
 
     // === OpenAI -> Twilio ===
-    let audioChunkCount = 0;
-    let responseStartTime = null;
-
     openaiWs.on("message", async (raw) => {
       let msg;
       try {
@@ -120,26 +129,19 @@ export function initRealtimeServer(server) {
 
       // Response gestartet
       if (msg.type === "response.created") {
-        responseStartTime = Date.now();
         audioChunkCount = 0;
         console.log("🎬 Response gestartet");
       }
 
-      // KRITISCH: Audio-Events - ALLE MÖGLICHEN NAMEN TESTEN!
-      const isAudioEvent = 
-        msg.type === "response.audio.delta" ||
-        msg.type === "response.output_audio.delta" ||
-        msg.type === "audio.delta" ||
-        msg.type === "response.audio_transcript.delta";
-
-      if (isAudioEvent && msg.delta) {
+      // Audio-Events
+      if (msg.type === "response.audio.delta" && msg.delta) {
         audioChunkCount++;
         
         if (audioChunkCount === 1) {
-          const latency = Date.now() - responseStartTime;
-          console.log(`🔊 Audio startet! Event: ${msg.type} (${latency}ms)`);
+          console.log(`🔊 Audio-Streaming startet (streamSid: ${streamSid ? 'OK' : 'FEHLT!'})`);
         }
 
+        // KRITISCH: Nur senden wenn streamSid vorhanden!
         if (streamSid && ws.readyState === WebSocket.OPEN) {
           ws.send(
             JSON.stringify({
@@ -150,16 +152,15 @@ export function initRealtimeServer(server) {
               },
             })
           );
+        } else if (!streamSid && audioChunkCount === 1) {
+          console.error("❌ FEHLER: Kann Audio nicht senden - streamSid fehlt!");
         }
       }
 
       // Response fertig
       if (msg.type === "response.done") {
-        if (responseStartTime) {
-          const totalTime = Date.now() - responseStartTime;
-          console.log(`✅ Response fertig (${totalTime}ms, ${audioChunkCount} chunks)`);
-        }
-
+        console.log(`✅ Response fertig (${audioChunkCount} chunks gesendet)`);
+        
         // Termin-Erkennung (optional)
         if (msg.response?.output) {
           const text = msg.response.output
@@ -174,14 +175,14 @@ export function initRealtimeServer(server) {
             console.log("📅 Termin-Keyword erkannt");
             createCalendarEvent({
               summary: "Neuer Patiententermin",
-              description: "Automatisch erstellt",
+              description: "Automatisch erstellt via Sprachassistent",
               startISO: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
             }).catch(err => console.error("❌ Kalender-Fehler:", err.message));
           }
         }
       }
 
-      // NUR kritische Fehler loggen (nicht den harmlosen buffer-empty)
+      // Nur kritische Fehler loggen
       if (msg.type === "error" && msg.error?.code !== "input_audio_buffer_commit_empty") {
         console.error("❌ OpenAI Error:", msg.error?.code, msg.error?.message);
       }
@@ -199,6 +200,8 @@ export function initRealtimeServer(server) {
     openaiWs.on("error", (err) => console.error("❌ WebSocket Error:", err.message));
   });
 }
+
+
 
 
 
