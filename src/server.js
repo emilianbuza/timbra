@@ -21,9 +21,6 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// === Token-Route (Twilio Capability Token für Browser-Client) ===
-app.use("/", tokenRoute);
-
 // === Healthcheck ===
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -49,9 +46,6 @@ app.post("/api/new-lead", async (req, res) => {
 // === Eingehende SMS (Twilio Webhook) ===
 app.post("/webhooks/sms", handleIncomingSMS);
 
-// === Übersicht aller Leads ===
-app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
-
 // === Twilio Voice Webhook (eingehender Anruf) ===
 // KRITISCHER FIX: track="inbound" verhindert Echo
 app.post("/webhooks/voice", (req, res) => {
@@ -72,6 +66,12 @@ app.post("/webhooks/voice", (req, res) => {
 
   res.status(200).type("text/xml").send(twiml);
 });
+
+// === Übersicht aller Leads ===
+app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
+
+// === Token-Route MUSS NACH den spezifischen Routes kommen! ===
+app.use("/", tokenRoute);
 
 // === client.html ausliefern (Test-Frontend für Browser-Calls) ===
 const __filename = fileURLToPath(import.meta.url);
