@@ -1,8 +1,7 @@
 import { WebSocketServer } from "ws";
 import { createClient } from "@deepgram/sdk";
 import Groq from "groq-sdk";
-import ElevenLabsNode from "elevenlabs-node";
-const { ElevenLabsClient } = ElevenLabsNode;
+import { ElevenLabsClient } from "elevenlabs";
 import { v4 as uuidv4 } from "uuid";
 
 // Initialisiere Clients
@@ -284,4 +283,5 @@ Antworte kurz und präzise (max 2 Sätze).`,
     }
   });
 }
+
 
