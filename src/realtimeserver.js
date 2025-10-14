@@ -115,7 +115,8 @@ export function initRealtimeServer(server) {
         'hm',
         'ard text',
         'untertitel',
-        'im auftrag'
+        'im auftrag',
+        'applaus'
       ];
       const lower = text.toLowerCase().trim();
       return junk.some(j => lower === j || (lower.includes(j) && text.length < 20));
@@ -391,7 +392,12 @@ Antworte sehr kurz (max 1-2 Sätze).`,
           streamSid = msg.start.streamSid;
           metrics.twilioConnected = true;
           
-          log('twilio', 'Stream Start', { callId, streamSid });
+          const tracks = msg.start.tracks || [];
+          log('twilio', 'Stream Start', { callId, streamSid, tracks });
+          
+          if (!tracks.includes("inbound")) {
+            log('warning', 'Kein inbound track!');
+          }
 
           setTimeout(() => {
             handleUserInput("Hallo");
@@ -399,6 +405,10 @@ Antworte sehr kurz (max 1-2 Sätze).`,
         }
 
         if (msg.event === "media") {
+          if (msg.media.track !== "inbound") {
+            return;
+          }
+
           metrics.audioChunksReceived++;
           const audioPayload = Buffer.from(msg.media.payload, "base64");
 
