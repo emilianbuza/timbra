@@ -21,11 +21,8 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// Request Logger - zeigt ALLE eingehenden Requests
-app.use((req, res, next) => {
-  console.log(`📨 ${req.method} ${req.path} from ${req.ip}`);
-  next();
-});
+// === Token-Route (Twilio Capability Token für Browser-Client) ===
+app.use("/", tokenRoute);
 
 // === Healthcheck ===
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -52,60 +49,29 @@ app.post("/api/new-lead", async (req, res) => {
 // === Eingehende SMS (Twilio Webhook) ===
 app.post("/webhooks/sms", handleIncomingSMS);
 
+// === Übersicht aller Leads ===
+app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
+
 // === Twilio Voice Webhook (eingehender Anruf) ===
 app.post("/webhooks/voice", (req, res) => {
-  try {
-    const from = req.body.From || "unbekannt";
-    const callSid = req.body.CallSid || "unknown";
-    
-    console.log("📞 Eingehender Anruf:", from);
-    console.log("🔍 Call SID:", callSid);
-    console.log("🔍 Request Body:", JSON.stringify(req.body).substring(0, 300));
+  console.log("📞 Eingehender Anruf:", req.body.From || "unbekannt");
+  console.log("🔍 CallSid:", req.body.CallSid);
+  console.log("🔍 Body Keys:", Object.keys(req.body).join(", "));
 
-    const baseUrl =
-      process.env.BASE_URL?.replace(/^https?:\/\//, "") ||
-      "timbra-ai.onrender.com";
+  const baseUrl =
+    process.env.BASE_URL?.replace(/^https?:\/\//, "") ||
+    "timbra-ai.onrender.com";
 
-    console.log("🔍 WebSocket URL:", `wss://${baseUrl}/media-stream`);
-
-    // TwiML - teste erst OHNE track Parameter
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="wss://${baseUrl}/media-stream" />
   </Connect>
 </Response>`;
 
-    console.log("📤 Sending TwiML:", twiml);
-    
-    res.status(200).type("text/xml").send(twiml);
-    
-    console.log("✅ TwiML Response sent successfully");
-  } catch (err) {
-    console.error("❌ Voice webhook error:", err.message);
-    console.error("❌ Stack:", err.stack);
-    res.status(500).type("text/xml").send('<Response><Say>Error occurred</Say></Response>');
-  }
-});
-
-// === Übersicht aller Leads ===
-app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
-
-// === Token-Route MUSS NACH den spezifischen Routes kommen! ===
-app.use("/", tokenRoute);
-
-// === 404 Handler - zeigt nicht gefundene Routes ===
-app.use((req, res, next) => {
-  console.error(`❌ 404 Not Found: ${req.method} ${req.path}`);
-  console.error(`❌ Available routes should include: /webhooks/voice, /webhooks/sms, /api/leads, /health`);
-  res.status(404).json({ error: "Not Found", path: req.path });
-});
-
-// === Error Handler ===
-app.use((err, req, res, next) => {
-  console.error("❌ Global Error Handler:", err.message);
-  console.error("❌ Stack:", err.stack);
-  res.status(500).json({ error: "Internal Server Error" });
+  console.log("📤 TwiML:", twiml);
+  res.status(200).type("text/xml").send(twiml);
+  console.log("✅ Response sent");
 });
 
 // === client.html ausliefern (Test-Frontend für Browser-Calls) ===
