@@ -143,12 +143,14 @@ Antworte kurz und präzise (max 2 Sätze).`,
       const startTime = Date.now();
 
       try {
-        const audioStream = await elevenlabs.textToSpeech.convert({
-          voice_id: "pNInz6obpgDQGcFmaJgB", // Adam voice (German)
-          model_id: "eleven_turbo_v2", // Fastest model
-          text: text,
-          output_format: "ulaw_8000", // Twilio format
-        });
+        const audioStream = await elevenlabs.textToSpeech.convert(
+  "pNInz6obpgDQGcFmaJgB",
+  {
+    text: text,
+    model_id: "eleven_turbo_v2",
+    output_format: "ulaw_8000"
+  }
+);
 
         let audioData = Buffer.alloc(0);
         
@@ -283,5 +285,6 @@ Antworte kurz und präzise (max 2 Sätze).`,
     }
   });
 }
+
 
 
