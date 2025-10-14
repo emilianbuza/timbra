@@ -1,397 +1,285 @@
-import WebSocket, { WebSocketServer } from "ws";
-import dotenv from "dotenv";
-import { createCalendarEvent } from "./calendar.js";
-dotenv.config();
+import { WebSocketServer } from "ws";
+import { createClient } from "@deepgram/sdk";
+import Groq from "groq-sdk";
+import { ElevenLabsClient, stream } from "elevenlabs-node";
+import { v4 as uuidv4 } from "uuid";
 
-const OPENAI_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-10-01";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-/**
- * DEBUG VERSION mit funktionierendem Variablennamen
- */
-
-class CallDebugger {
-  constructor(callId) {
-    this.callId = callId;
-    this.startTime = Date.now();
-    this.metrics = {
-      audioChunksReceived: 0,
-      audioChunksSent: 0,
-      userSpeechDetected: 0,
-      responsesGenerated: 0,
-      errors: []
-    };
-    this.timeline = [];
-  }
-
-  log(event, data = {}) {
-    const timestamp = Date.now() - this.startTime;
-    const entry = {
-      time: timestamp,
-      event,
-      ...data
-    };
-    this.timeline.push(entry);
-    
-    const emoji = this.getEmoji(event);
-    console.log(`${emoji} [${timestamp}ms] ${event}`, JSON.stringify(data));
-  }
-
-  getEmoji(event) {
-    const emojiMap = {
-      'call_start': '📞',
-      'session_configured': '✅',
-      'greeting_triggered': '📤',
-      'user_speech_start': '🎤',
-      'user_speech_end': '⏸️',
-      'transcription': '📝',
-      'response_start': '🎬',
-      'audio_start': '🔊',
-      'audio_chunk': '📦',
-      'response_end': '✅',
-      'error': '❌',
-      'warning': '⚠️',
-      'performance': '⏱️',
-      'call_end': '🔚',
-      'openai_connected': '🧠',
-      'stream_started': '🪪',
-      'stream_stopped': '🛑',
-      'audio_chunks_received': '⬇️',
-      'audio_part_added': '📦',
-      'response_text': '💬',
-      'appointment_keyword_detected': '📅',
-      'rate_limits': '🚦',
-      'openai_disconnected': '🔌'
-    };
-    return emojiMap[event] || '📌';
-  }
-
-  generateReport() {
-    console.log('\n' + '='.repeat(60));
-    console.log(`📊 DEBUG REPORT - Call ${this.callId}`);
-    console.log('='.repeat(60));
-    
-    console.log('\n📈 METRICS:');
-    console.log(`  Audio Chunks Received: ${this.metrics.audioChunksReceived}`);
-    console.log(`  Audio Chunks Sent: ${this.metrics.audioChunksSent}`);
-    console.log(`  User Speech Detected: ${this.metrics.userSpeechDetected}`);
-    console.log(`  Responses Generated: ${this.metrics.responsesGenerated}`);
-    
-    console.log('\n⏱️ PERFORMANCE:');
-    const responseTimings = this.timeline
-      .filter(e => e.event === 'response_start')
-      .map((start, idx) => {
-        const end = this.timeline.find((e, i) => 
-          i > this.timeline.indexOf(start) && e.event === 'response_end'
-        );
-        return end ? end.time - start.time : null;
-      })
-      .filter(t => t !== null);
-    
-    if (responseTimings.length > 0) {
-      const avg = responseTimings.reduce((a, b) => a + b, 0) / responseTimings.length;
-      console.log(`  Avg Response Time: ${avg.toFixed(0)}ms`);
-      console.log(`  Min Response Time: ${Math.min(...responseTimings)}ms`);
-      console.log(`  Max Response Time: ${Math.max(...responseTimings)}ms`);
-    }
-    
-    console.log('\n🔍 ISSUES DETECTED:');
-    if (this.metrics.userSpeechDetected === 0) {
-      console.log('  ⛔ CRITICAL: No user speech detected! VAD not working!');
-    }
-    if (this.metrics.responsesGenerated === 0) {
-      console.log('  ⛔ CRITICAL: No responses generated!');
-    }
-    if (this.metrics.audioChunksSent === 0) {
-      console.log('  ⛔ CRITICAL: No audio sent to user!');
-    }
-    if (this.metrics.audioChunksReceived < 10) {
-      console.log('  ⚠️ WARNING: Very few audio chunks received from Twilio');
-    }
-    if (this.metrics.errors.length > 0) {
-      console.log(`  ❌ ${this.metrics.errors.length} errors occurred`);
-      this.metrics.errors.forEach(err => console.log(`    - ${err}`));
-    }
-    
-    console.log('\n' + '='.repeat(60) + '\n');
-  }
-}
+// Initialisiere Clients
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const elevenlabs = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY });
 
 export function initRealtimeServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
   console.log("🎧 Realtime-Server wartet auf Twilio-Streams...");
 
-  wss.on("connection", (ws) => {
-    const callId = `call_${Date.now()}`;
-    const dbg = new CallDebugger(callId);  // FIXED: dbg statt debugger
-    dbg.log('call_start', { callId });
+  wss.on("connection", (twilioWs) => {
+    console.log("📞 Neue Twilio-Verbindung");
 
+    // Session State
+    const sessionId = uuidv4();
+    let callId = null;
     let streamSid = null;
-    let lastResponseStart = null;
-    let lastSpeechStart = null;
+    let deepgramConnection = null;
+    let conversationHistory = [];
+    let isProcessing = false;
+    let audioBuffer = "";
+    let silenceTimer = null;
+    const SILENCE_THRESHOLD = 800; // ms
 
-    const openaiWs = new WebSocket(
-      `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`,
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "realtime=v1",
-        },
-      }
-    );
+    // Debug Metrics
+    const metrics = {
+      startTime: Date.now(),
+      audioChunksReceived: 0,
+      audioChunksSent: 0,
+      transcriptions: 0,
+      responses: 0,
+    };
 
-    openaiWs.on("open", () => {
-      dbg.log('openai_connected');
-
-      const sessionConfig = {
-        type: "session.update",
-        session: {
-          input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
-          modalities: ["text", "audio"],
-          voice: "alloy",
-          
-          // BALANCED VAD - Kompromiss zwischen Speed & Zuverlässigkeit
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,              // ZURÜCK zu 0.5 - bewährt!
-            prefix_padding_ms: 250,      
-            silence_duration_ms: 900,    // Kompromiss: schneller als 1200, stabiler als 700
-          },
-          
-          instructions: "Du bist Lea, Assistentin von Praxis Dr. Buza. Begrüße freundlich: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?' Sei höflich und geduldig. Bei Terminfragen: Erfrage Datum UND Uhrzeit. Bestätige den Termin klar. Bei unklaren Antworten ('Was?', 'Ja?', 'Hallo?'): Frage höflich nach. Lege nur auf wenn Patient sich klar verabschiedet (z.B. 'Tschüss', 'Danke, das wars'). Antworte kurz und präzise.",
-          
-          temperature: 0.7,
-          max_response_output_tokens: 200,  // Reduziert von 300 für Speed
-          
-          input_audio_transcription: {
-            model: "whisper-1"
-          },
-        },
-      };
-      
-      dbg.log('session_config_sent', { 
-        vad_threshold: sessionConfig.session.turn_detection.threshold,
-        vad_silence_ms: sessionConfig.session.turn_detection.silence_duration_ms,
-        temperature: sessionConfig.session.temperature
+    // Deepgram STT Setup
+    function setupDeepgram() {
+      deepgramConnection = deepgram.listen.live({
+        model: "nova-2",
+        language: "de",
+        smart_format: true,
+        interim_results: false,
+        endpointing: 800, // Silence detection
+        utterance_end_ms: 800,
       });
-      
-      openaiWs.send(JSON.stringify(sessionConfig));
 
-      setTimeout(() => {
-        dbg.log('greeting_triggered');
-        openaiWs.send(JSON.stringify({
-          type: "response.create",
-          response: { modalities: ["text", "audio"] },
-        }));
-      }, 200);
-    });
+      deepgramConnection.on("open", () => {
+        console.log(`🎤 [${elapsed()}ms] deepgram_connected`);
+      });
 
-    // === Twilio -> OpenAI ===
-    ws.on("message", (raw) => {
-      let data;
+      deepgramConnection.on("Results", async (data) => {
+        const transcript = data.channel?.alternatives?.[0]?.transcript;
+        
+        if (transcript && transcript.trim().length > 0) {
+          metrics.transcriptions++;
+          console.log(`📝 [${elapsed()}ms] transcription`, { text: transcript });
+          
+          // Verarbeite User-Input
+          await handleUserInput(transcript);
+        }
+      });
+
+      deepgramConnection.on("error", (err) => {
+        console.error(`❌ [${elapsed()}ms] deepgram_error`, err);
+      });
+    }
+
+    // Groq LLM Processing
+    async function handleUserInput(userText) {
+      if (isProcessing) {
+        console.log(`⏸️ [${elapsed()}ms] already_processing`);
+        return;
+      }
+
+      isProcessing = true;
+      console.log(`🧠 [${elapsed()}ms] groq_processing_start`);
+
       try {
-        data = JSON.parse(raw.toString());
-      } catch (e) {
-        return;
-      }
+        // Add to conversation history
+        conversationHistory.push({
+          role: "user",
+          content: userText,
+        });
 
-      if (data.event === "start") {
-        streamSid = data.start?.streamSid || data.streamSid || null;
-        dbg.log('stream_started', { streamSid });
-        return;
-      }
+        // Call Groq
+        const startTime = Date.now();
+        const completion = await groq.chat.completions.create({
+          model: "llama-3.3-70b-versatile", // Schnellstes Groq Model
+          messages: [
+            {
+              role: "system",
+              content: `Du bist Lea, Assistentin von Praxis Dr. Buza. 
+Begrüße freundlich: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?'
+Bei Terminfragen: Erfrage Datum UND Uhrzeit. Bestätige klar.
+Bei unklaren Antworten: Frage höflich nach.
+Lege nur auf wenn Patient sich klar verabschiedet.
+Antworte kurz und präzise (max 2 Sätze).`,
+            },
+            ...conversationHistory,
+          ],
+          temperature: 0.7,
+          max_tokens: 150,
+        });
 
-      if (data.event === "media" && data.media?.payload) {
-        dbg.metrics.audioChunksReceived++;
-        
-        if (dbg.metrics.audioChunksReceived % 100 === 0) {
-          dbg.log('audio_chunks_received', { 
-            total: dbg.metrics.audioChunksReceived 
-          });
+        const groqLatency = Date.now() - startTime;
+        const responseText = completion.choices[0]?.message?.content || "";
+
+        console.log(`✅ [${elapsed()}ms] groq_response`, {
+          latency_ms: groqLatency,
+          text: responseText.substring(0, 100),
+        });
+
+        // Add to history
+        conversationHistory.push({
+          role: "assistant",
+          content: responseText,
+        });
+
+        metrics.responses++;
+
+        // Check for appointment keywords
+        if (responseText.toLowerCase().includes("termin")) {
+          console.log(`📅 [${elapsed()}ms] appointment_detected`);
+          // TODO: Calendar integration
         }
-        
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: "input_audio_buffer.append",
-            audio: data.media.payload,
-          }));
-        }
-        return;
-      }
 
-      if (data.event === "stop") {
-        dbg.log('stream_stopped');
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        }
-        return;
-      }
-    });
+        // Generate Speech with ElevenLabs
+        await generateSpeech(responseText);
 
-    // === OpenAI -> Twilio ===
-    openaiWs.on("message", async (raw) => {
-      let msg;
+      } catch (error) {
+        console.error(`❌ [${elapsed()}ms] groq_error`, error.message);
+      } finally {
+        isProcessing = false;
+      }
+    }
+
+    // ElevenLabs TTS
+    async function generateSpeech(text) {
+      console.log(`🔊 [${elapsed()}ms] tts_start`);
+      const startTime = Date.now();
+
       try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        return;
-      }
+        const audioStream = await elevenlabs.textToSpeech.convert({
+          voice_id: "pNInz6obpgDQGcFmaJgB", // Adam voice (German)
+          model_id: "eleven_turbo_v2", // Fastest model
+          text: text,
+          output_format: "ulaw_8000", // Twilio format
+        });
 
-      if (msg.type === "session.updated") {
-        dbg.log('session_configured');
-      }
-
-      if (msg.type === "input_audio_buffer.speech_started") {
-        lastSpeechStart = Date.now();
-        dbg.log('user_speech_start');
-        dbg.metrics.userSpeechDetected++;
-      }
-
-      if (msg.type === "input_audio_buffer.speech_stopped") {
-        const duration = lastSpeechStart ? Date.now() - lastSpeechStart : null;
-        dbg.log('user_speech_end', { duration_ms: duration });
-      }
-
-      if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        const transcript = msg.transcript || "";
-        dbg.log('transcription', { text: transcript });
-      }
-
-      if (msg.type === "response.created") {
-        lastResponseStart = Date.now();
-        dbg.log('response_start', { responseId: msg.response?.id });
-        dbg.metrics.responsesGenerated++;
+        let audioData = Buffer.alloc(0);
         
-        // KRITISCH: Clear input buffer um Echo/Feedback zu vermeiden
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: "input_audio_buffer.clear"
-          }));
-        }
-      }
-
-      if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
-        dbg.metrics.audioChunksSent++;
-        
-        if (dbg.metrics.audioChunksSent === 1) {
-          const latency = lastResponseStart ? Date.now() - lastResponseStart : null;
-          dbg.log('audio_start', { 
-            latency_ms: latency,
-            event_type: msg.type 
-          });
-        }
-        
-        if (dbg.metrics.audioChunksSent % 50 === 0) {
-          dbg.log('audio_chunk', { 
-            total_sent: dbg.metrics.audioChunksSent 
-          });
+        for await (const chunk of audioStream) {
+          audioData = Buffer.concat([audioData, chunk]);
         }
 
-        if (streamSid && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
+        const ttsLatency = Date.now() - startTime;
+        console.log(`✅ [${elapsed()}ms] tts_complete`, { 
+          latency_ms: ttsLatency,
+          bytes: audioData.length 
+        });
+
+        // Send to Twilio
+        sendAudioToTwilio(audioData);
+
+      } catch (error) {
+        console.error(`❌ [${elapsed()}ms] tts_error`, error.message);
+      }
+    }
+
+    // Send Audio to Twilio
+    function sendAudioToTwilio(audioBuffer) {
+      // Split into chunks (Twilio expects ~20ms chunks)
+      const chunkSize = 160; // 20ms of 8kHz ulaw
+      let offset = 0;
+
+      while (offset < audioBuffer.length) {
+        const chunk = audioBuffer.slice(offset, offset + chunkSize);
+        const base64Audio = chunk.toString("base64");
+
+        twilioWs.send(
+          JSON.stringify({
             event: "media",
             streamSid: streamSid,
-            media: { payload: msg.delta },
-          }));
-        }
+            media: {
+              payload: base64Audio,
+            },
+          })
+        );
+
+        metrics.audioChunksSent++;
+        offset += chunkSize;
       }
 
-      if (msg.type === "response.content_part.added" && msg.part?.type === "audio") {
-        dbg.log('audio_part_added');
-      }
+      console.log(`📤 [${elapsed()}ms] audio_sent`, { chunks: metrics.audioChunksSent });
+    }
 
-      if (msg.type === "response.done") {
-        const duration = lastResponseStart ? Date.now() - lastResponseStart : null;
-        dbg.log('response_end', { 
-          duration_ms: duration,
-          chunks_sent: dbg.metrics.audioChunksSent
-        });
+    // Handle Twilio Messages
+    twilioWs.on("message", async (message) => {
+      try {
+        const msg = JSON.parse(message);
 
-        // DEBUG: Log die KOMPLETTE Response-Struktur
-        dbg.log('response_structure', { 
-          response: JSON.stringify(msg.response).substring(0, 500)
-        });
+        if (msg.event === "start") {
+          callId = `call_${Date.now()}`;
+          streamSid = msg.start.streamSid;
+          console.log(`📞 [${elapsed()}ms] call_start`, { callId, streamSid });
+          
+          // Setup Deepgram
+          setupDeepgram();
 
-        // Mehrere Wege den Text zu extrahieren
-        let text = "";
-        
-        // Weg 1: Über output array - transcript ist im AUDIO object!
-        if (msg.response?.output) {
-          text = msg.response.output
-            .filter(item => item.type === "message")
-            .flatMap(item => item.content || [])
-            .filter(c => c.type === "audio")  // FIXED: audio statt text!
-            .map(c => c.transcript || "")     // FIXED: transcript property
-            .join(" ");
-        }
-        
-        // Weg 2: Direkt aus response
-        if (!text && msg.response?.text) {
-          text = msg.response.text;
-        }
-        
-        // Weg 3: Aus content array
-        if (!text && msg.response?.content) {
-          text = msg.response.content
-            .filter(c => c.type === "audio")
-            .map(c => c.transcript || "")
-            .join(" ");
+          // Send greeting after 1 second
+          setTimeout(() => {
+            handleUserInput("Hallo"); // Trigger greeting
+          }, 1000);
         }
 
-        dbg.log('response_text', { 
-          text: text.substring(0, 200),
-          length: text.length,
-          found_via: text ? "success" : "EMPTY"
-        });
+        if (msg.event === "media") {
+          metrics.audioChunksReceived++;
 
-        if (text && text.toLowerCase().includes("termin")) {
-          dbg.log('appointment_keyword_detected');
-          createCalendarEvent({
-            summary: "Neuer Patiententermin (Telefon)",
-            description: `Call: ${callId}\n\n${text}`,
-            startISO: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-          }).catch(err => {
-            dbg.metrics.errors.push(`Calendar: ${err.message}`);
-            dbg.log('error', { type: 'calendar', message: err.message });
-          });
+          // Decode audio and send to Deepgram
+          const audioPayload = Buffer.from(msg.media.payload, "base64");
+          
+          if (deepgramConnection && deepgramConnection.getReadyState() === 1) {
+            deepgramConnection.send(audioPayload);
+          }
+
+          // Log every 100 chunks
+          if (metrics.audioChunksReceived % 100 === 0) {
+            console.log(`⬇️ [${elapsed()}ms] audio_chunks_received`, { 
+              total: metrics.audioChunksReceived 
+            });
+          }
         }
-      }
 
-      if (msg.type === "error") {
-        if (msg.error?.code !== "input_audio_buffer_commit_empty") {
-          dbg.metrics.errors.push(`${msg.error?.code}: ${msg.error?.message}`);
-          dbg.log('error', { 
-            code: msg.error?.code, 
-            message: msg.error?.message 
-          });
+        if (msg.event === "stop") {
+          console.log(`🛑 [${elapsed()}ms] stream_stopped`);
+          if (deepgramConnection) {
+            deepgramConnection.finish();
+          }
         }
-      }
 
-      if (msg.type === "rate_limits.updated") {
-        dbg.log('rate_limits', { 
-          limits: msg.rate_limits 
-        });
+      } catch (err) {
+        console.error(`❌ [${elapsed()}ms] message_error`, err.message);
       }
     });
 
-    // === Cleanup ===
-    ws.on("close", () => {
-      dbg.log('call_end');
-      dbg.generateReport(); 
+    twilioWs.on("close", () => {
+      console.log(`🔚 [${elapsed()}ms] call_end`);
       
-      if (openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.close();
+      if (deepgramConnection) {
+        deepgramConnection.finish();
       }
+
+      // Print Debug Report
+      printDebugReport();
     });
 
-    openaiWs.on("close", () => {
-      dbg.log('openai_disconnected');
+    twilioWs.on("error", (err) => {
+      console.error(`❌ [${elapsed()}ms] websocket_error`, err.message);
     });
 
-    openaiWs.on("error", (err) => {
-      dbg.metrics.errors.push(`WebSocket: ${err.message}`);
-      dbg.log('error', { type: 'websocket', message: err.message });
-    });
+    // Helper: elapsed time
+    function elapsed() {
+      return Date.now() - metrics.startTime;
+    }
+
+    // Debug Report
+    function printDebugReport() {
+      const duration = Date.now() - metrics.startTime;
+      
+      console.log("\n============================================================");
+      console.log(`📊 DEBUG REPORT - Call ${callId}`);
+      console.log("============================================================\n");
+      console.log("📈 METRICS:");
+      console.log(`  Audio Chunks Received: ${metrics.audioChunksReceived}`);
+      console.log(`  Audio Chunks Sent: ${metrics.audioChunksSent}`);
+      console.log(`  Transcriptions: ${metrics.transcriptions}`);
+      console.log(`  Responses Generated: ${metrics.responses}`);
+      console.log(`  Total Duration: ${duration}ms`);
+      console.log("\n============================================================\n");
+    }
   });
 }
