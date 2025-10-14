@@ -9,7 +9,7 @@ import { generateText } from "./openaiclient.js";
 import { outboundSMSPrompt } from "./prompts.js";
 import { upsertLead, listLeads, setLeadStatus } from "./memoryStore.js";
 import { sendSMS, handleIncomingSMS } from "./twilioHandlers.js";
-import { initRealtimeServer } from "./realtimeserver.js";
+import { initRealtimeServer } from "./realtimeserver-groq.js";
 import tokenRoute from "./tokenRoute.js";
 
 dotenv.config();
