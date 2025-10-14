@@ -3,7 +3,7 @@ import axios from "axios";
 import FormData from "form-data";
 import fs from "fs";
 import path from "path";
-import { insertEvent } from "./calendar.js";
+import { createCalendarEvent } from "./calendar.js";
 
 // === OpenAI Realtime Verbindung ===
 const OPENAI_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
@@ -105,3 +105,4 @@ export function initRealtimeServer(server) {
     openaiWs.on("close", () => console.log("🔚 OpenAI getrennt"));
   });
 }
+
