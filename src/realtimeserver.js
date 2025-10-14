@@ -61,7 +61,7 @@ export function initRealtimeServer(server) {
             instructions: "Du bist Lea von Praxis Dr. Buza. Begrüße kurz: 'Guten Tag, Praxis Dr. Buza, was kann ich tun?' Antworte SEHR kurz (max 1-2 Sätze). Bei Termin: frage Datum + Uhrzeit. Sei natürlich und schnell.",
                         
             // KRITISCH: Niedrige Temperatur für ZUVERLÄSSIGE Konsistenz
-            temperature: 0.4,               // Konservativer Wert für zuverlässige Antworten
+            temperature: 0.6,               // Konservativer Wert für zuverlässige Antworten
             max_response_output_tokens: 150, // Begrenzt Länge der Antworten
 
             // Transcription aktivieren (neu für Debugging)
@@ -252,3 +252,4 @@ export function initRealtimeServer(server) {
     openaiWs.on("error", (err) => console.error("❌ WebSocket Error:", err.message));
   });
 }
+
