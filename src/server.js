@@ -16,7 +16,9 @@ dotenv.config();
 
 // === Express Setup ===
 const app = express();
-app.use("/webhooks/sms", bodyParser.urlencoded({ extended: false }));
+
+// Global aktivieren: Twilio sendet x-www-form-urlencoded!
+app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
 // === Token-Route (Twilio Capability Token für Browser-Client) ===
@@ -33,7 +35,6 @@ app.post("/api/new-lead", async (req, res) => {
       return res.status(400).json({ error: "name und phone sind Pflicht" });
 
     const lead = upsertLead({ name, phone, service });
-
     const smsText = await generateText(outboundSMSPrompt({ name, service }));
     await sendSMS(phone, smsText);
 
@@ -52,9 +53,8 @@ app.post("/webhooks/sms", handleIncomingSMS);
 app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
 
 // === Twilio Voice Webhook (eingehender Anruf) ===
-// Hier KEIN doppelter Handler! Dieser eine ist der richtige.
 app.post("/webhooks/voice", (req, res) => {
-  console.log("📞 Eingehender Anruf:", req.body.From);
+  console.log("📞 Eingehender Anruf:", req.body.From || "unbekannt");
 
   // BASE_URL z. B. https://timbra-ai.onrender.com
   const baseUrl =
@@ -62,15 +62,14 @@ app.post("/webhooks/voice", (req, res) => {
     "timbra-ai.onrender.com";
 
   // TwiML-Antwort: kein Twilio-Greeting, direkter Realtime-Stream
-  const twiml = `
-    <Response>
-      <Connect>
-        <Stream url="wss://${baseUrl}/media-stream" />
-      </Connect>
-    </Response>
-  `;
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://${baseUrl}/media-stream" />
+  </Connect>
+</Response>`;
 
-  res.type("text/xml").send(twiml);
+  res.status(200).type("text/xml").send(twiml);
 });
 
 // === client.html ausliefern (Test-Frontend für Browser-Calls) ===
