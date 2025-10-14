@@ -19,13 +19,13 @@ const app = express();
 app.use("/webhooks/sms", bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// === Token-Route (für Twilio Client Capability) ===
+// === Token-Route (Twilio Capability Token für Browser-Client) ===
 app.use("/", tokenRoute);
 
 // === Healthcheck ===
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// === Lead: neuer Kontakt => SMS senden ===
+// === Lead-API: Neuer Kontakt -> SMS senden ===
 app.post("/api/new-lead", async (req, res) => {
   try {
     const { name, phone, service = "Beratung" } = req.body || {};
@@ -52,19 +52,28 @@ app.post("/webhooks/sms", handleIncomingSMS);
 app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
 
 // === Twilio Voice Webhook (eingehender Anruf) ===
+// Hier KEIN doppelter Handler! Dieser eine ist der richtige.
 app.post("/webhooks/voice", (req, res) => {
+  console.log("📞 Eingehender Anruf:", req.body.From);
+
+  // BASE_URL z. B. https://timbra-ai.onrender.com
+  const baseUrl =
+    process.env.BASE_URL?.replace(/^https?:\/\//, "") ||
+    "timbra-ai.onrender.com";
+
+  // TwiML-Antwort: kein Twilio-Greeting, direkter Realtime-Stream
   const twiml = `
     <Response>
-      <Say voice="Polly.Vicki">Willkommen bei Praxis Dr. Emilian Buza. Bitte bleiben Sie kurz dran.</Say>
-      <Pause length="1"/>
-      <Say>Der Sprachassistent wird gleich verbunden.</Say>
+      <Connect>
+        <Stream url="wss://${baseUrl}/media-stream" />
+      </Connect>
     </Response>
   `;
-  res.type("text/xml");
-  res.send(twiml);
+
+  res.type("text/xml").send(twiml);
 });
 
-// === client.html ausliefern ===
+// === client.html ausliefern (Test-Frontend für Browser-Calls) ===
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -72,10 +81,11 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "client.html"));
 });
 
-// === HTTP Server + Realtime ===
+// === HTTP Server + Realtime-Server initialisieren ===
 const server = http.createServer(app);
 initRealtimeServer(server);
 
 server.listen(process.env.PORT || 10000, () => {
   console.log(`✅ Timbra AI läuft auf Port ${process.env.PORT || 10000}`);
+  console.log("🎧 Warte auf Twilio-Voice-Streams unter /media-stream");
 });
