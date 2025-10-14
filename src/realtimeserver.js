@@ -4,7 +4,7 @@ import { createCalendarEvent } from "./calendar.js";
 dotenv.config();
 
 const OPENAI_MODEL =
-  process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
+  process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 /**
@@ -213,3 +213,4 @@ export function initRealtimeServer(server) {
     openaiWs.on("error", (err) => console.error("❌ WebSocket Error:", err.message));
   });
 }
+
