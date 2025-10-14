@@ -316,13 +316,13 @@ export function initRealtimeServer(server) {
         // Mehrere Wege den Text zu extrahieren
         let text = "";
         
-        // Weg 1: Über output array
+        // Weg 1: Über output array - transcript ist im AUDIO object!
         if (msg.response?.output) {
           text = msg.response.output
             .filter(item => item.type === "message")
             .flatMap(item => item.content || [])
-            .filter(c => c.type === "text")
-            .map(c => c.text)
+            .filter(c => c.type === "audio")  // FIXED: audio statt text!
+            .map(c => c.transcript || "")     // FIXED: transcript property
             .join(" ");
         }
         
@@ -334,8 +334,8 @@ export function initRealtimeServer(server) {
         // Weg 3: Aus content array
         if (!text && msg.response?.content) {
           text = msg.response.content
-            .filter(c => c.type === "text")
-            .map(c => c.text)
+            .filter(c => c.type === "audio")
+            .map(c => c.transcript || "")
             .join(" ");
         }
 
@@ -395,3 +395,17 @@ export function initRealtimeServer(server) {
     });
   });
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
