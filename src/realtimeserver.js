@@ -151,18 +151,18 @@ export function initRealtimeServer(server) {
           modalities: ["text", "audio"],
           voice: "alloy",
           
-          // AGGRESSIVE VAD für SCHNELLE Responses
+          // BALANCED VAD - Kompromiss zwischen Speed & Zuverlässigkeit
           turn_detection: {
             type: "server_vad",
-            threshold: 0.7,              // HÖHER = schneller reagieren, weniger False Positives
-            prefix_padding_ms: 200,      // REDUZIERT für Speed
-            silence_duration_ms: 700,    // REDUZIERT von 1200 für Speed!
+            threshold: 0.5,              // ZURÜCK zu 0.5 - bewährt!
+            prefix_padding_ms: 250,      
+            silence_duration_ms: 900,    // Kompromiss: schneller als 1200, stabiler als 700
           },
           
-          instructions: "Du bist Lea, Assistentin von Praxis Dr. Buza. Begrüße mit: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?' Bei Termin: Erfrage Datum und Uhrzeit. Bestätige klar. Bei unklaren Antworten ('Was?', 'Ja?'): Frage nach. Lege nur auf wenn Patient sich verabschiedet.",
+          instructions: "Du bist Lea, Assistentin von Praxis Dr. Buza. Begrüße freundlich: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?' Sei höflich und geduldig. Bei Terminfragen: Erfrage Datum UND Uhrzeit. Bestätige den Termin klar. Bei unklaren Antworten ('Was?', 'Ja?', 'Hallo?'): Frage höflich nach. Lege nur auf wenn Patient sich klar verabschiedet (z.B. 'Tschüss', 'Danke, das wars'). Antworte kurz und präzise.",
           
-          temperature: 0.8,
-          max_response_output_tokens: 250,  // Reduziert von 300 für Speed
+          temperature: 0.7,
+          max_response_output_tokens: 200,  // Reduziert von 300 für Speed
           
           input_audio_transcription: {
             model: "whisper-1"
