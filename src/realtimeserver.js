@@ -151,18 +151,18 @@ export function initRealtimeServer(server) {
           modalities: ["text", "audio"],
           voice: "alloy",
           
-          // OPTIMIERTE VAD - Höherer Threshold um Echo zu vermeiden
+          // OPTIMIERTE VAD für Echo-Vermeidung
           turn_detection: {
             type: "server_vad",
-            threshold: 0.6,              // Erhöht um False Positives zu reduzieren
+            threshold: 0.6,              // Höher = weniger False Positives
             prefix_padding_ms: 300,
-            silence_duration_ms: 1200,
+            silence_duration_ms: 1200,   // Balance zwischen Speed & Zuverlässigkeit
           },
           
-          instructions: "Du bist Lea von Praxis Dr. Buza. Begrüße kurz: 'Guten Tag, Praxis Dr. Buza, was kann ich tun?' Antworte kurz (max 2 Sätze). Bei Termin: frage Datum + Uhrzeit.",
+          instructions: "Du bist Lea, eine freundliche und geduldige Assistentin der Praxis Dr. Buza. Sprich natürlich und empathisch auf Deutsch. Begrüße Anrufer mit: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?' Bei Terminfragen: Erfrage IMMER Datum UND Uhrzeit. Wenn unklar, frage nach. Bestätige den Termin deutlich. Frage am Ende: 'Kann ich sonst noch etwas für Sie tun?' Lege NIEMALS auf ohne klare Verabschiedung vom Patienten. Bei 'Ja', 'Was', 'Bitte' oder ähnlichen Kurzantworten: Wiederhole die letzte Frage oder frage nach Klarstellung.",
           
-          temperature: 0.7,
-          max_response_output_tokens: 150,
+          temperature: 0.8,
+          max_response_output_tokens: 300,
           
           input_audio_transcription: {
             model: "whisper-1"
@@ -395,17 +395,3 @@ export function initRealtimeServer(server) {
     });
   });
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
