@@ -1,27 +1,30 @@
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
-import { generateText } from "./openaiclient.js";
+import { generateText } from "./openaiClient.js"; // Beachte: Groß-/Kleinschreibung korrekt
 import { outboundSMSPrompt } from "./prompts.js";
 import { upsertLead, listLeads, setLeadStatus } from "./memoryStore.js";
 import { sendSMS, handleIncomingSMS } from "./twilioHandlers.js";
 import http from "http";
-import { initRealtimeServer } from "./realtimeserver.js"; // Groß-/Kleinschreibung korrigiert
+import { initRealtimeServer } from "./realtimeserver.js";
+import tokenRoute from "./tokenRoute.js"; // Deine neue Token-Route
 
-dotenv.config();
+dotenv.config(); // <== .env zuerst laden
 
-const app = express();
+const app = express(); // <== app erst hier initialisieren!
 
-// Twilio sendet x-www-form-urlencoded bei Webhooks
+// Middleware
 app.use("/webhooks/sms", bodyParser.urlencoded({ extended: false }));
-// JSON für unsere eigenen APIs
 app.use(bodyParser.json());
 
-// Health
+// Token-Route aktivieren
+app.use("/", tokenRoute);
+
+// Healthcheck
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /**
- * 1) Neuer Lead → sofort SMS
+ * 1️⃣ Neuer Lead → sofort SMS
  */
 app.post("/api/new-lead", async (req, res) => {
   try {
@@ -44,34 +47,21 @@ app.post("/api/new-lead", async (req, res) => {
 });
 
 /**
- * 2) Twilio Webhook: eingehende Antworten (SMS)
+ * 2️⃣ Twilio Webhook: eingehende Antworten
  */
 app.post("/webhooks/sms", handleIncomingSMS);
 
 /**
- * 3) Einfache Übersicht (MVP)
+ * 3️⃣ Übersicht aller Leads (MVP)
  */
 app.get("/api/leads", (_req, res) => {
   res.json({ leads: listLeads() });
 });
 
-/**
- * 4) Twilio Voice Webhook → startet Realtime Stream
- */
-app.post("/webhooks/voice", (req, res) => {
-  const twiml = `
-    <Response>
-      <Connect>
-        <Stream url="wss://${process.env.BASE_URL.replace(/^https?:\/\//, "")}/realtime" />
-      </Connect>
-    </Response>`;
-  res.type("text/xml").send(twiml);
-});
-
-// === Server starten + Realtime-Server initialisieren ===
+// HTTP-Server starten
 const server = http.createServer(app);
 initRealtimeServer(server);
+
 server.listen(process.env.PORT || 10000, () =>
   console.log(`✅ Timbra AI läuft auf Port ${process.env.PORT || 10000}`)
 );
-
