@@ -151,18 +151,18 @@ export function initRealtimeServer(server) {
           modalities: ["text", "audio"],
           voice: "alloy",
           
-          // OPTIMIERTE VAD für Echo-Vermeidung
+          // AGGRESSIVE VAD für SCHNELLE Responses
           turn_detection: {
             type: "server_vad",
-            threshold: 0.6,              // Höher = weniger False Positives
-            prefix_padding_ms: 300,
-            silence_duration_ms: 1200,   // Balance zwischen Speed & Zuverlässigkeit
+            threshold: 0.7,              // HÖHER = schneller reagieren, weniger False Positives
+            prefix_padding_ms: 200,      // REDUZIERT für Speed
+            silence_duration_ms: 700,    // REDUZIERT von 1200 für Speed!
           },
           
-          instructions: "Du bist Lea, eine freundliche und geduldige Assistentin der Praxis Dr. Buza. Sprich natürlich und empathisch auf Deutsch. Begrüße Anrufer mit: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?' Bei Terminfragen: Erfrage IMMER Datum UND Uhrzeit. Wenn unklar, frage nach. Bestätige den Termin deutlich. Frage am Ende: 'Kann ich sonst noch etwas für Sie tun?' Lege NIEMALS auf ohne klare Verabschiedung vom Patienten. Bei 'Ja', 'Was', 'Bitte' oder ähnlichen Kurzantworten: Wiederhole die letzte Frage oder frage nach Klarstellung.",
+          instructions: "Du bist Lea, Assistentin von Praxis Dr. Buza. Begrüße mit: 'Guten Tag, Praxis Dr. Buza, was kann ich für Sie tun?' Bei Termin: Erfrage Datum und Uhrzeit. Bestätige klar. Bei unklaren Antworten ('Was?', 'Ja?'): Frage nach. Lege nur auf wenn Patient sich verabschiedet.",
           
           temperature: 0.8,
-          max_response_output_tokens: 300,
+          max_response_output_tokens: 250,  // Reduziert von 300 für Speed
           
           input_audio_transcription: {
             model: "whisper-1"
