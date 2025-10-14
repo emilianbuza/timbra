@@ -9,7 +9,7 @@ import { generateText } from "./openaiclient.js";
 import { outboundSMSPrompt } from "./prompts.js";
 import { upsertLead, listLeads, setLeadStatus } from "./memoryStore.js";
 import { sendSMS, handleIncomingSMS } from "./twilioHandlers.js";
-import { initRealtimeServer } from "./realtimeserver-groq.js";
+import { initRealtimeServer } from "./realtimeserver.js";
 import tokenRoute from "./tokenRoute.js";
 
 dotenv.config();
@@ -90,3 +90,4 @@ server.listen(process.env.PORT || 10000, () => {
   console.log(`✅ Timbra AI läuft auf Port ${process.env.PORT || 10000}`);
   console.log("🎧 Warte auf Twilio-Voice-Streams unter /media-stream");
 });
+
