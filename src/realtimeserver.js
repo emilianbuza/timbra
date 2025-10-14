@@ -3,12 +3,11 @@ import dotenv from "dotenv";
 import { createCalendarEvent } from "./calendar.js";
 dotenv.config();
 
-// KRITISCH: Stabiler Alias für die Realtime API
 const OPENAI_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 /**
- * FINALE, OPTIMIERTE VERSION für SCHNELLE und ZUVERLÄSSIGE Responses
+ * FINALE, KORRIGIERTE VERSION für SCHNELLE Antworten und KLARES AUDIO (A-LAW)
  */
 export function initRealtimeServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
@@ -19,7 +18,7 @@ export function initRealtimeServer(server) {
 
     let streamSid = null;
     let audioChunkCount = 0;
-    let conversationContext = ""; // Für besseren Context-Tracking
+    let conversationContext = ""; 
 
     const openaiWs = new WebSocket(
       `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`,
@@ -34,37 +33,29 @@ export function initRealtimeServer(server) {
     openaiWs.on("open", () => {
       console.log("🧠 Verbunden mit OpenAI Realtime API");
 
-      // OPTIMIERTE Session-Konfiguration
       openaiWs.send(
         JSON.stringify({
           type: "session.update",
           session: {
-            // KRITISCH: Audio-Formate für Twilio
-            input_audio_format: "g711_ulaw",
-            output_audio_format: "g711_ulaw",
+            // KRITISCH: AUF A-LAW (PCMA) UMGESTELLT FÜR EUROPA
+            input_audio_format: "g711_alaw", // War ulaw
+            output_audio_format: "g711_alaw", // War ulaw
                         
-            // KRITISCH: Beide Modalities
             modalities: ["text", "audio"],
-                        
-            // Voice
             voice: "alloy",
                         
-            // OPTIMIERTE Turn Detection für SCHNELLE Antworten und natürliche deutsche Pausen
             turn_detection: {
               type: "server_vad",
-              threshold: 0.6,               // Aggressive VAD
-              prefix_padding_ms: 200,       // Weniger Padding = schneller
-              silence_duration_ms: 800,     // Optimaler Wert, um den Benutzer nicht zu unterbrechen
+              threshold: 0.6,
+              prefix_padding_ms: 200,
+              silence_duration_ms: 800,
             },
                         
-            // KÜRZERE Instructions = schnellere Verarbeitung & Fokus
             instructions: "Du bist Lea von Praxis Dr. Buza. Begrüße kurz: 'Guten Tag, Praxis Dr. Buza, was kann ich tun?' Antworte SEHR kurz (max 1-2 Sätze). Bei Termin: frage Datum + Uhrzeit. Sei natürlich und schnell.",
                         
-            // KRITISCH: Niedrige Temperatur für ZUVERLÄSSIGE Konsistenz
-            temperature: 0.6,               // Konservativer Wert für zuverlässige Antworten
-            max_response_output_tokens: 150, // Begrenzt Länge der Antworten
+            temperature: 0.6, // KRITISCH: Muss mind. 0.6 sein
+            max_response_output_tokens: 150,
 
-            // Transcription aktivieren (neu für Debugging)
             input_audio_transcription: {
               model: "whisper-1"
             },
@@ -72,7 +63,6 @@ export function initRealtimeServer(server) {
         })
       );
 
-      // Initiale Begrüßung schneller triggern
       setTimeout(() => {
         console.log("📤 Triggere Begrüßung...");
         openaiWs.send(
@@ -84,10 +74,10 @@ export function initRealtimeServer(server) {
             },
           })
         );
-      }, 50); // Extrem schnelles Start-Timing
+      }, 50);
     });
 
-    // === Twilio -> OpenAI ===
+    // === Twilio -> OpenAI (Input Logik) ===
     ws.on("message", (raw) => {
       let data;
       try {
@@ -96,7 +86,6 @@ export function initRealtimeServer(server) {
         return;
       }
 
-      // streamSid extrahieren
       if (data.event === "start") {
         streamSid = data.start?.streamSid || data.streamSid || null;
         console.log("🪪 streamSid:", streamSid);
@@ -106,7 +95,6 @@ export function initRealtimeServer(server) {
         return;
       }
 
-      // Audio → OpenAI
       if (data.event === "media" && data.media?.payload) {
         if (openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.send(
@@ -119,7 +107,6 @@ export function initRealtimeServer(server) {
         return;
       }
 
-      // Stream-Ende
       if (data.event === "stop") {
         console.log("🛑 Twilio Stream-Stop");
         if (openaiWs.readyState === WebSocket.OPEN) {
@@ -129,7 +116,7 @@ export function initRealtimeServer(server) {
       }
     });
 
-    // === OpenAI -> Twilio ===
+    // === OpenAI -> Twilio (Output Logik) ===
     openaiWs.on("message", async (raw) => {
       let msg;
       try {
@@ -138,26 +125,23 @@ export function initRealtimeServer(server) {
         return;
       }
 
-      // Session OK
       if (msg.type === "session.updated") {
         console.log("✅ Session konfiguriert");
       }
 
-      // INPUT TRANSCRIPTION (neu für Debugging)
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const transcript = msg.transcript || "";
         console.log(`🎤 User sagte: "${transcript}"`);
         conversationContext += `User: ${transcript}\n`;
       }
 
-      // Response Start
       if (msg.type === "response.created") {
         audioChunkCount = 0;
         const responseId = msg.response?.id || "unknown";
         console.log(`🎬 Response ${responseId} gestartet`);
       }
 
-      // KRITISCH: Audio-Events - NUR DIE ECHTEN AUDIO-EVENTS!
+      // KRITISCH: Audio-Events
       if (
         (msg.type === "response.audio.delta" || 
          msg.type === "response.output_audio.delta") &&
@@ -182,23 +166,19 @@ export function initRealtimeServer(server) {
         }
       }
 
-      // Content Part für Logging
       if (msg.type === "response.content_part.added" && msg.part?.type === "audio") {
         console.log("📦 Audio Content Part erkannt");
       }
 
-      // Response Text Tracking (für Context)
       if (msg.type === "response.audio_transcript.delta") {
         const delta = msg.delta || "";
         conversationContext += delta;
       }
 
-      // Response Ende mit Analyse
       if (msg.type === "response.done") {
         const duration = audioChunkCount > 0 ? "OK" : "KEIN AUDIO!";
         console.log(`✅ Response fertig (${audioChunkCount} chunks) - ${duration}`);
                 
-        // Termin-Erkennung
         if (msg.response?.output) {
           const text = msg.response.output
             .filter(item => item.type === "message")
@@ -225,16 +205,12 @@ export function initRealtimeServer(server) {
         }
       }
 
-      // Fehlerbehandlung (außer harmlosem buffer-empty)
       if (msg.type === "error") {
-        if (msg.error?.code === "input_audio_buffer_commit_empty") {
-          // Harmlos - ignorieren
-        } else {
+        if (msg.error?.code !== "input_audio_buffer_commit_empty") {
           console.error("❌ OpenAI Error:", msg.error?.code, msg.error?.message);
         }
       }
 
-      // Rate Limits warnen
       if (msg.type === "rate_limits.updated") {
         console.log("⚠️ Rate Limits Update:", JSON.stringify(msg.rate_limits));
       }
@@ -252,4 +228,3 @@ export function initRealtimeServer(server) {
     openaiWs.on("error", (err) => console.error("❌ WebSocket Error:", err.message));
   });
 }
-
