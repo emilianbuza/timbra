@@ -44,6 +44,9 @@ export function initRealtimeServer(server) {
     let audioBuffer = [];
     let silenceTimer = null;
 
+    const MAX_BUFFER_CHUNKS = 150;
+    const SILENCE_MS = 800;
+
     const metrics = {
       sessionId,
       startTime,
@@ -54,6 +57,8 @@ export function initRealtimeServer(server) {
       transcriptionAttempts: 0,
       transcriptionsReceived: 0,
       emptyTranscriptions: 0,
+      bufferOverflows: 0,
+      silenceTriggers: 0,
       groqWhisperRequests: 0,
       groqWhisperResponses: 0,
       groqWhisperErrors: 0,
@@ -96,11 +101,16 @@ export function initRealtimeServer(server) {
       console.log(`${emoji} [${timestamp}ms] ${message}`, data ? JSON.stringify(data).substring(0, 300) : '');
     }
 
-    async function transcribeAudio() {
-      if (audioBuffer.length === 0 || isProcessing) {
-        log('warning', 'Transcribe Skip', { 
-          reason: audioBuffer.length === 0 ? 'empty_buffer' : 'already_processing',
-          bufferChunks: audioBuffer.length 
+    async function transcribeAudio(trigger) {
+      if (audioBuffer.length === 0) {
+        log('warning', 'Transcribe Skip: Empty Buffer');
+        return;
+      }
+
+      if (isProcessing) {
+        log('warning', 'Transcribe Skip: Already Processing', {
+          bufferChunks: audioBuffer.length,
+          trigger
         });
         return;
       }
@@ -108,11 +118,14 @@ export function initRealtimeServer(server) {
       isProcessing = true;
       metrics.transcriptionAttempts++;
       
+      if (trigger === 'silence') metrics.silenceTriggers++;
+      if (trigger === 'overflow') metrics.bufferOverflows++;
+      
       const audioData = Buffer.concat(audioBuffer);
       const bufferChunks = audioBuffer.length;
       audioBuffer = [];
       
-      log('whisper', `Transcription Attempt #${metrics.transcriptionAttempts}`, {
+      log('whisper', `Transcription Attempt #${metrics.transcriptionAttempts} (${trigger})`, {
         audioBytes: audioData.length,
         bufferChunks: bufferChunks,
         durationSeconds: (audioData.length / 8000).toFixed(2)
@@ -431,6 +444,20 @@ Antworte kurz und präzise (max 2 Sätze).`,
             });
           }
 
+          // BUFFER OVERFLOW PROTECTION
+          if (audioBuffer.length >= MAX_BUFFER_CHUNKS && !isProcessing) {
+            log('buffer', '⚠️ BUFFER OVERFLOW TRIGGER!', {
+              chunks: audioBuffer.length,
+              maxChunks: MAX_BUFFER_CHUNKS,
+              bytes: metrics.audioBufferSize
+            });
+            
+            if (silenceTimer) clearTimeout(silenceTimer);
+            transcribeAudio('overflow');
+            return;
+          }
+
+          // SILENCE DETECTION
           if (silenceTimer) clearTimeout(silenceTimer);
           
           silenceTimer = setTimeout(() => {
@@ -440,14 +467,14 @@ Antworte kurz und präzise (max 2 Sätze).`,
             });
             
             if (audioBuffer.length > 40) {
-              transcribeAudio();
+              transcribeAudio('silence');
             } else {
               log('warning', 'Buffer zu klein für Transkription', {
                 chunks: audioBuffer.length,
                 minRequired: 40
               });
             }
-          }, 1500);
+          }, SILENCE_MS);
 
           if (metrics.audioChunksReceived % 100 === 0) {
             log('info', 'Audio Progress', {
@@ -516,6 +543,8 @@ Antworte kurz und präzise (max 2 Sätze).`,
       console.log(`  Whisper Errors: ${metrics.groqWhisperErrors}`);
       console.log(`  Valid Transcriptions: ${metrics.transcriptionsReceived}`);
       console.log(`  Empty Transcriptions: ${metrics.emptyTranscriptions}`);
+      console.log(`  Silence Triggers: ${metrics.silenceTriggers}`);
+      console.log(`  Buffer Overflows: ${metrics.bufferOverflows}`);
       
       console.log("\n🧠 GROQ CHAT:");
       console.log(`  Requests: ${metrics.groqChatRequests}`);
