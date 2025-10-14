@@ -1,23 +1,13 @@
 import { WebSocketServer } from "ws";
-import { createClient } from "@deepgram/sdk";
 import Groq from "groq-sdk";
 import { ElevenLabsClient } from "elevenlabs";
 import { v4 as uuidv4 } from "uuid";
 
 console.log("🔍 API Key Checks:");
-console.log("  DEEPGRAM:", process.env.DEEPGRAM_API_KEY ? `${process.env.DEEPGRAM_API_KEY.substring(0, 10)}... (${process.env.DEEPGRAM_API_KEY.length} chars)` : "❌ MISSING");
 console.log("  GROQ:", process.env.GROQ_API_KEY ? `${process.env.GROQ_API_KEY.substring(0, 10)}... (${process.env.GROQ_API_KEY.length} chars)` : "❌ MISSING");
 console.log("  ELEVENLABS:", process.env.ELEVENLABS_API_KEY ? `${process.env.ELEVENLABS_API_KEY.substring(0, 10)}... (${process.env.ELEVENLABS_API_KEY.length} chars)` : "❌ MISSING");
 
-let deepgram, groq, elevenlabs;
-
-try {
-  deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-  console.log("✅ Deepgram Client erstellt");
-} catch (err) {
-  console.error("❌ Deepgram Init Error:", err.message);
-  process.exit(1);
-}
+let groq, elevenlabs;
 
 try {
   groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -49,24 +39,27 @@ export function initRealtimeServer(server) {
 
     let callId = null;
     let streamSid = null;
-    let deepgramConnection = null;
     let conversationHistory = [];
     let isProcessing = false;
-    let deepgramReady = false;
+    let audioBuffer = [];
+    let silenceTimer = null;
 
     const metrics = {
       sessionId,
       startTime,
       twilioConnected: false,
-      deepgramConnected: false,
       audioChunksReceived: 0,
-      audioBytesSentToDeepgram: 0,
-      deepgramResults: 0,
+      audioBufferSize: 0,
+      audioBufferChunks: 0,
+      transcriptionAttempts: 0,
       transcriptionsReceived: 0,
       emptyTranscriptions: 0,
-      groqRequests: 0,
-      groqResponses: 0,
-      groqErrors: 0,
+      groqWhisperRequests: 0,
+      groqWhisperResponses: 0,
+      groqWhisperErrors: 0,
+      groqChatRequests: 0,
+      groqChatResponses: 0,
+      groqChatErrors: 0,
       ttsRequests: 0,
       ttsResponses: 0,
       ttsErrors: 0,
@@ -91,115 +84,144 @@ export function initRealtimeServer(server) {
         'success': '✅',
         'warning': '⚠️',
         'error': '❌',
-        'deepgram': '🎤',
+        'whisper': '🎤',
         'groq': '🧠',
         'elevenlabs': '🔊',
         'twilio': '📞',
         'audio': '🔉',
-        'transcript': '📝'
+        'transcript': '📝',
+        'buffer': '💾'
       }[type] || '•';
 
-      console.log(`${emoji} [${timestamp}ms] ${message}`, data ? JSON.stringify(data).substring(0, 200) : '');
+      console.log(`${emoji} [${timestamp}ms] ${message}`, data ? JSON.stringify(data).substring(0, 300) : '');
     }
 
-    function setupDeepgram() {
-      log('deepgram', 'Starte Deepgram Connection Setup...');
-      
-      const config = {
-        model: "nova-2",
-        language: "de",
-        encoding: "mulaw",
-        sample_rate: 8000,
-        channels: 1,
-        smart_format: true,
-        interim_results: false,
-        endpointing: 800,
-        utterance_end_ms: 800,
-      };
-      
-      log('deepgram', 'Deepgram Config:', config);
-
-      try {
-        deepgramConnection = deepgram.listen.live(config);
-        
-        deepgramConnection.on("open", () => {
-          deepgramReady = true;
-          metrics.deepgramConnected = true;
-          log('success', 'Deepgram Connection OPEN');
+    async function transcribeAudio() {
+      if (audioBuffer.length === 0 || isProcessing) {
+        log('warning', 'Transcribe Skip', { 
+          reason: audioBuffer.length === 0 ? 'empty_buffer' : 'already_processing',
+          bufferChunks: audioBuffer.length 
         });
-
-        deepgramConnection.on("Results", async (data) => {
-          metrics.deepgramResults++;
-          
-          log('deepgram', `Deepgram Results Event #${metrics.deepgramResults}`);
-          log('deepgram', 'Raw Deepgram Data:', {
-            hasChannel: !!data.channel,
-            hasAlternatives: !!data.channel?.alternatives,
-            alternativesCount: data.channel?.alternatives?.length || 0
-          });
-          
-          const transcript = data.channel?.alternatives?.[0]?.transcript;
-          const confidence = data.channel?.alternatives?.[0]?.confidence;
-          
-          if (transcript && transcript.trim().length > 0) {
-            metrics.transcriptionsReceived++;
-            log('transcript', `Transkription #${metrics.transcriptionsReceived}: "${transcript}"`, {
-              confidence,
-              length: transcript.length
-            });
-            await handleUserInput(transcript);
-          } else {
-            metrics.emptyTranscriptions++;
-            log('warning', `Leere Transkription (Total: ${metrics.emptyTranscriptions})`);
-          }
-        });
-
-        deepgramConnection.on("error", (err) => {
-          metrics.errors.push({ time: Date.now() - startTime, component: 'deepgram', error: String(err) });
-          log('error', 'Deepgram Error:', {
-            message: err.message,
-            type: err.type,
-            code: err.code,
-            string: String(err)
-          });
-        });
-
-        deepgramConnection.on("close", (code, reason) => {
-          deepgramReady = false;
-          log('warning', 'Deepgram Connection Closed', { code, reason });
-        });
-
-        deepgramConnection.on("warning", (warning) => {
-          log('warning', 'Deepgram Warning:', warning);
-        });
-
-        deepgramConnection.on("metadata", (metadata) => {
-          log('info', 'Deepgram Metadata:', metadata);
-        });
-
-        deepgramConnection.on("UtteranceEnd", () => {
-          log('info', 'Deepgram UtteranceEnd Event');
-        });
-
-        deepgramConnection.on("SpeechStarted", () => {
-          log('info', 'Deepgram SpeechStarted Event');
-        });
-
-      } catch (err) {
-        metrics.errors.push({ time: Date.now() - startTime, component: 'deepgram_setup', error: err.message });
-        log('error', 'Deepgram Setup Error:', { message: err.message, stack: err.stack });
-      }
-    }
-
-    async function handleUserInput(userText) {
-      if (isProcessing) {
-        log('warning', 'Bereits am Verarbeiten - Skip');
         return;
       }
 
       isProcessing = true;
-      metrics.groqRequests++;
-      log('groq', `Groq Request #${metrics.groqRequests} für Text: "${userText}"`);
+      metrics.transcriptionAttempts++;
+      
+      const audioData = Buffer.concat(audioBuffer);
+      const bufferChunks = audioBuffer.length;
+      audioBuffer = [];
+      
+      log('whisper', `Transcription Attempt #${metrics.transcriptionAttempts}`, {
+        audioBytes: audioData.length,
+        bufferChunks: bufferChunks,
+        durationSeconds: (audioData.length / 8000).toFixed(2)
+      });
+
+      try {
+        log('whisper', 'Konvertiere μ-law zu WAV...');
+        const wavBuffer = convertMulawToWav(audioData);
+        log('success', 'WAV erstellt', { wavBytes: wavBuffer.length });
+
+        metrics.groqWhisperRequests++;
+        log('whisper', `Groq Whisper Request #${metrics.groqWhisperRequests}...`);
+        
+        const whisperStart = Date.now();
+        const transcription = await groq.audio.transcriptions.create({
+          file: new File([wavBuffer], "audio.wav", { type: "audio/wav" }),
+          model: "whisper-large-v3-turbo",
+          language: "de",
+          response_format: "text"
+        });
+        
+        const whisperLatency = Date.now() - whisperStart;
+        metrics.groqWhisperResponses++;
+
+        const text = typeof transcription === 'string' ? transcription.trim() : '';
+        
+        log('whisper', `Whisper Response #${metrics.groqWhisperResponses} (${whisperLatency}ms)`, {
+          textLength: text.length,
+          text: text.substring(0, 100)
+        });
+        
+        if (text && text.length > 0) {
+          metrics.transcriptionsReceived++;
+          log('transcript', `Valid Transcription #${metrics.transcriptionsReceived}: "${text}"`);
+          await handleUserInput(text);
+        } else {
+          metrics.emptyTranscriptions++;
+          log('warning', `Leere Transkription (Total: ${metrics.emptyTranscriptions})`);
+        }
+
+      } catch (error) {
+        metrics.groqWhisperErrors++;
+        metrics.errors.push({ 
+          time: Date.now() - startTime, 
+          component: 'groq_whisper', 
+          error: error.message,
+          status: error.status,
+          type: error.type
+        });
+        log('error', 'Whisper Error:', { 
+          message: error.message,
+          status: error.status,
+          type: error.type,
+          stack: error.stack?.substring(0, 200)
+        });
+      } finally {
+        isProcessing = false;
+        log('info', 'Processing Lock Released');
+      }
+    }
+
+    function convertMulawToWav(mulawData) {
+      log('info', 'μ-law → PCM Conversion...', { inputBytes: mulawData.length });
+      
+      const pcmData = new Int16Array(mulawData.length);
+      
+      for (let i = 0; i < mulawData.length; i++) {
+        const mulaw = mulawData[i];
+        const sign = (mulaw & 0x80) >> 7;
+        const magnitude = (mulaw & 0x7F);
+        let sample = magnitude << 3;
+        sample += 0x84;
+        sample <<= (magnitude >> 4);
+        sample -= 0x84;
+        if (sign === 1) sample = -sample;
+        pcmData[i] = sample;
+      }
+
+      const wavHeader = Buffer.alloc(44);
+      const dataLength = pcmData.length * 2;
+      const fileLength = dataLength + 36;
+
+      wavHeader.write('RIFF', 0);
+      wavHeader.writeUInt32LE(fileLength, 4);
+      wavHeader.write('WAVE', 8);
+      wavHeader.write('fmt ', 12);
+      wavHeader.writeUInt32LE(16, 16);
+      wavHeader.writeUInt16LE(1, 20);
+      wavHeader.writeUInt16LE(1, 22);
+      wavHeader.writeUInt32LE(8000, 24);
+      wavHeader.writeUInt32LE(16000, 28);
+      wavHeader.writeUInt16LE(2, 32);
+      wavHeader.writeUInt16LE(16, 34);
+      wavHeader.write('data', 36);
+      wavHeader.writeUInt32LE(dataLength, 40);
+
+      log('success', 'WAV Header erstellt', { 
+        sampleRate: 8000,
+        channels: 1,
+        bitsPerSample: 16,
+        dataLength: dataLength
+      });
+
+      return Buffer.concat([wavHeader, Buffer.from(pcmData.buffer)]);
+    }
+
+    async function handleUserInput(userText) {
+      metrics.groqChatRequests++;
+      log('groq', `Chat Request #${metrics.groqChatRequests} für: "${userText}"`);
 
       try {
         conversationHistory.push({
@@ -207,13 +229,13 @@ export function initRealtimeServer(server) {
           content: userText,
         });
 
-        log('groq', 'Sende an Groq...', {
+        log('groq', 'Sende an Groq Chat...', {
           model: "llama-3.3-70b-versatile",
           historyLength: conversationHistory.length,
           temperature: 0.7,
           maxTokens: 150
         });
-        
+
         const groqStart = Date.now();
         const completion = await groq.chat.completions.create({
           model: "llama-3.3-70b-versatile",
@@ -236,8 +258,8 @@ Antworte kurz und präzise (max 2 Sätze).`,
         const groqLatency = Date.now() - groqStart;
         const responseText = completion.choices[0]?.message?.content || "";
 
-        metrics.groqResponses++;
-        log('success', `Groq Response #${metrics.groqResponses} (${groqLatency}ms): "${responseText}"`, {
+        metrics.groqChatResponses++;
+        log('success', `Chat Response #${metrics.groqChatResponses} (${groqLatency}ms): "${responseText}"`, {
           finishReason: completion.choices[0]?.finish_reason,
           tokensUsed: completion.usage
         });
@@ -250,16 +272,18 @@ Antworte kurz und präzise (max 2 Sätze).`,
         await generateSpeech(responseText);
 
       } catch (error) {
-        metrics.groqErrors++;
-        metrics.errors.push({ time: Date.now() - startTime, component: 'groq', error: error.message });
-        log('error', 'Groq Error:', {
+        metrics.groqChatErrors++;
+        metrics.errors.push({ 
+          time: Date.now() - startTime, 
+          component: 'groq_chat', 
+          error: error.message 
+        });
+        log('error', 'Groq Chat Error:', {
           message: error.message,
           status: error.status,
           type: error.type,
-          stack: error.stack
+          stack: error.stack?.substring(0, 200)
         });
-      } finally {
-        isProcessing = false;
       }
     }
 
@@ -296,7 +320,7 @@ Antworte kurz und präzise (max 2 Sätze).`,
           chunkCount++;
           
           if (chunkCount === 1) {
-            log('audio', 'Erstes Audio-Chunk empfangen', { bytes: chunk.length });
+            log('audio', 'Erstes TTS-Chunk', { bytes: chunk.length });
           }
         }
 
@@ -313,18 +337,22 @@ Antworte kurz und präzise (max 2 Sätze).`,
 
       } catch (error) {
         metrics.ttsErrors++;
-        metrics.errors.push({ time: Date.now() - startTime, component: 'elevenlabs', error: error.message });
+        metrics.errors.push({ 
+          time: Date.now() - startTime, 
+          component: 'elevenlabs', 
+          error: error.message 
+        });
         log('error', 'ElevenLabs Error:', {
           message: error.message,
           name: error.name,
           status: error.status,
-          stack: error.stack
+          stack: error.stack?.substring(0, 200)
         });
       }
     }
 
     function sendAudioToTwilio(audioBuffer) {
-      log('twilio', 'Sende Audio an Twilio...', {
+      log('twilio', 'Sende Audio...', {
         totalBytes: audioBuffer.length,
         streamSid: streamSid
       });
@@ -353,13 +381,17 @@ Antworte kurz und präzise (max 2 Sätze).`,
           chunks++;
           offset += chunkSize;
         } catch (err) {
-          metrics.errors.push({ time: Date.now() - startTime, component: 'twilio_send', error: err.message });
+          metrics.errors.push({ 
+            time: Date.now() - startTime, 
+            component: 'twilio_send', 
+            error: err.message 
+          });
           log('error', 'Twilio Send Error:', { message: err.message });
           break;
         }
       }
 
-      log('success', `Audio an Twilio gesendet: ${chunks} chunks, ${audioBuffer.length} bytes`);
+      log('success', `Audio gesendet: ${chunks} chunks, ${audioBuffer.length} bytes`);
     }
 
     twilioWs.on("message", async (message) => {
@@ -375,11 +407,8 @@ Antworte kurz und präzise (max 2 Sätze).`,
             callId,
             streamSid,
             tracks: msg.start.tracks,
-            mediaFormat: msg.start.mediaFormat,
-            customParameters: msg.start.customParameters
+            mediaFormat: msg.start.mediaFormat
           });
-          
-          setupDeepgram();
 
           setTimeout(() => {
             log('info', 'Triggere Begrüßung...');
@@ -390,42 +419,41 @@ Antworte kurz und präzise (max 2 Sätze).`,
         if (msg.event === "media") {
           metrics.audioChunksReceived++;
           const audioPayload = Buffer.from(msg.media.payload, "base64");
-          metrics.audioBytesSentToDeepgram += audioPayload.length;
           
+          audioBuffer.push(audioPayload);
+          metrics.audioBufferSize += audioPayload.length;
+          metrics.audioBufferChunks = audioBuffer.length;
+
           if (metrics.audioChunksReceived === 1) {
             log('audio', 'Erstes Audio von Twilio', {
               bytes: audioPayload.length,
               timestamp: msg.media.timestamp
             });
           }
+
+          if (silenceTimer) clearTimeout(silenceTimer);
           
-          if (deepgramConnection && deepgramReady) {
-            const state = deepgramConnection.getReadyState();
+          silenceTimer = setTimeout(() => {
+            log('buffer', 'Silence detected - triggering transcription', {
+              bufferChunks: audioBuffer.length,
+              bufferBytes: metrics.audioBufferSize
+            });
             
-            if (state === 1) { // OPEN
-              deepgramConnection.send(audioPayload);
-              
-              if (metrics.audioChunksReceived === 1) {
-                log('success', 'Erstes Audio an Deepgram gesendet');
-              }
+            if (audioBuffer.length > 40) {
+              transcribeAudio();
             } else {
-              log('error', `Deepgram State=${state} (nicht OPEN=1)`, {
-                audioChunk: metrics.audioChunksReceived
+              log('warning', 'Buffer zu klein für Transkription', {
+                chunks: audioBuffer.length,
+                minRequired: 40
               });
             }
-          } else {
-            if (metrics.audioChunksReceived === 1) {
-              log('error', 'Deepgram nicht bereit!', {
-                connectionExists: !!deepgramConnection,
-                ready: deepgramReady
-              });
-            }
-          }
+          }, 1500);
 
           if (metrics.audioChunksReceived % 100 === 0) {
             log('info', 'Audio Progress', {
-              chunks: metrics.audioChunksReceived,
-              bytes: metrics.audioBytesSentToDeepgram,
+              chunksReceived: metrics.audioChunksReceived,
+              bufferChunks: audioBuffer.length,
+              bufferBytes: metrics.audioBufferSize,
               transcriptions: metrics.transcriptionsReceived
             });
           }
@@ -433,30 +461,38 @@ Antworte kurz und präzise (max 2 Sätze).`,
 
         if (msg.event === "stop") {
           log('twilio', 'Stream Stop Event');
-          if (deepgramConnection) {
-            deepgramConnection.finish();
-          }
+          if (silenceTimer) clearTimeout(silenceTimer);
         }
 
       } catch (err) {
-        metrics.errors.push({ time: Date.now() - startTime, component: 'message_handler', error: err.message });
-        log('error', 'Message Handler Error:', { message: err.message, stack: err.stack });
+        metrics.errors.push({ 
+          time: Date.now() - startTime, 
+          component: 'message_handler', 
+          error: err.message 
+        });
+        log('error', 'Message Handler Error:', { 
+          message: err.message, 
+          stack: err.stack?.substring(0, 200)
+        });
       }
     });
 
     twilioWs.on("close", () => {
       log('twilio', 'WebSocket Closed');
-      
-      if (deepgramConnection) {
-        deepgramConnection.finish();
-      }
-
+      if (silenceTimer) clearTimeout(silenceTimer);
       printDebugReport();
     });
 
     twilioWs.on("error", (err) => {
-      metrics.errors.push({ time: Date.now() - startTime, component: 'websocket', error: err.message });
-      log('error', 'WebSocket Error:', { message: err.message, stack: err.stack });
+      metrics.errors.push({ 
+        time: Date.now() - startTime, 
+        component: 'websocket', 
+        error: err.message 
+      });
+      log('error', 'WebSocket Error:', { 
+        message: err.message, 
+        stack: err.stack?.substring(0, 200)
+      });
     });
 
     function printDebugReport() {
@@ -466,24 +502,25 @@ Antworte kurz und präzise (max 2 Sätze).`,
       console.log(`📊 DEBUG REPORT - Session ${sessionId.substring(0, 8)}`);
       console.log("=".repeat(80));
       
-      console.log("\n🔌 CONNECTIONS:");
+      console.log("\n🔌 CONNECTION:");
       console.log(`  Twilio: ${metrics.twilioConnected ? '✅' : '❌'}`);
-      console.log(`  Deepgram: ${metrics.deepgramConnected ? '✅' : '❌'}`);
       
       console.log("\n🎤 AUDIO FLOW:");
-      console.log(`  Twilio → Server: ${metrics.audioChunksReceived} chunks (${metrics.audioBytesSentToDeepgram} bytes)`);
-      console.log(`  Server → Deepgram: ${metrics.audioBytesSentToDeepgram} bytes`);
+      console.log(`  Twilio → Server: ${metrics.audioChunksReceived} chunks`);
+      console.log(`  Buffer Size: ${metrics.audioBufferSize} bytes`);
       console.log(`  Server → Twilio: ${metrics.audioChunksSentToTwilio} chunks (${metrics.audioBytesSentToTwilio} bytes)`);
       
       console.log("\n📝 TRANSCRIPTION:");
-      console.log(`  Deepgram Results Events: ${metrics.deepgramResults}`);
+      console.log(`  Whisper Requests: ${metrics.groqWhisperRequests}`);
+      console.log(`  Whisper Responses: ${metrics.groqWhisperResponses}`);
+      console.log(`  Whisper Errors: ${metrics.groqWhisperErrors}`);
       console.log(`  Valid Transcriptions: ${metrics.transcriptionsReceived}`);
       console.log(`  Empty Transcriptions: ${metrics.emptyTranscriptions}`);
       
-      console.log("\n🧠 GROQ:");
-      console.log(`  Requests: ${metrics.groqRequests}`);
-      console.log(`  Responses: ${metrics.groqResponses}`);
-      console.log(`  Errors: ${metrics.groqErrors}`);
+      console.log("\n🧠 GROQ CHAT:");
+      console.log(`  Requests: ${metrics.groqChatRequests}`);
+      console.log(`  Responses: ${metrics.groqChatResponses}`);
+      console.log(`  Errors: ${metrics.groqChatErrors}`);
       
       console.log("\n🔊 TTS:");
       console.log(`  Requests: ${metrics.ttsRequests}`);
@@ -502,22 +539,22 @@ Antworte kurz und präzise (max 2 Sätze).`,
       
       console.log("\n📋 CRITICAL CHECKS:");
       if (metrics.audioChunksReceived === 0) {
-        console.log("  ⛔ KEINE Audio von Twilio empfangen!");
+        console.log("  ⛔ KEINE Audio von Twilio!");
       }
-      if (metrics.deepgramResults === 0) {
-        console.log("  ⛔ KEINE Deepgram Results Events!");
+      if (metrics.groqWhisperRequests === 0) {
+        console.log("  ⛔ KEINE Whisper Requests!");
       }
       if (metrics.transcriptionsReceived === 0) {
         console.log("  ⛔ KEINE validen Transkriptionen!");
       }
-      if (metrics.groqResponses === 0) {
-        console.log("  ⛔ KEINE Groq Responses!");
+      if (metrics.groqChatResponses === 0) {
+        console.log("  ⛔ KEINE Chat Responses!");
       }
       if (metrics.ttsResponses === 0) {
         console.log("  ⛔ KEINE TTS Responses!");
       }
       if (metrics.audioChunksSentToTwilio === 0) {
-        console.log("  ⛔ KEIN Audio zurück an Twilio gesendet!");
+        console.log("  ⛔ KEIN Audio an Twilio gesendet!");
       }
       
       console.log("\n" + "=".repeat(80) + "\n");
