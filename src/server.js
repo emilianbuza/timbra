@@ -1,7 +1,7 @@
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
-import { generateText } from "./openaiClient.js";
+import { generateText } from "./openaiclient.js";
 import { outboundSMSPrompt } from "./prompts.js";
 import { upsertLead, listLeads, setLeadStatus } from "./memoryStore.js";
 import { sendSMS, handleIncomingSMS } from "./twilioHandlers.js";
@@ -74,3 +74,4 @@ initRealtimeServer(server);
 server.listen(process.env.PORT || 10000, () =>
   console.log(`✅ Timbra AI läuft auf Port ${process.env.PORT || 10000}`)
 );
+
