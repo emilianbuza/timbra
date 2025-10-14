@@ -14,20 +14,15 @@ import tokenRoute from "./tokenRoute.js";
 
 dotenv.config();
 
-// === Express Setup ===
 const app = express();
 
-// Global aktivieren: Twilio sendet x-www-form-urlencoded!
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// === Token-Route (Twilio Capability Token für Browser-Client) ===
 app.use("/", tokenRoute);
 
-// === Healthcheck ===
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// === Lead-API: Neuer Kontakt -> SMS senden ===
 app.post("/api/new-lead", async (req, res) => {
   try {
     const { name, phone, service = "Beratung" } = req.body || {};
@@ -46,33 +41,29 @@ app.post("/api/new-lead", async (req, res) => {
   }
 });
 
-// === Eingehende SMS (Twilio Webhook) ===
 app.post("/webhooks/sms", handleIncomingSMS);
 
-// === Übersicht aller Leads ===
 app.get("/api/leads", (_req, res) => res.json({ leads: listLeads() }));
 
-// === Twilio Voice Webhook (eingehender Anruf) ===
+// KRITISCHER FIX: track="inbound" verhindert Echo!
 app.post("/webhooks/voice", (req, res) => {
   console.log("📞 Eingehender Anruf:", req.body.From || "unbekannt");
 
-  // BASE_URL z. B. https://timbra-ai.onrender.com
   const baseUrl =
     process.env.BASE_URL?.replace(/^https?:\/\//, "") ||
     "timbra-ai.onrender.com";
 
-  // TwiML-Antwort: kein Twilio-Greeting, direkter Realtime-Stream
+  // TwiML mit track="inbound" - sendet NUR Mikrofon-Audio, NICHT Output!
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://${baseUrl}/media-stream" />
+    <Stream url="wss://${baseUrl}/media-stream" track="inbound" />
   </Connect>
 </Response>`;
 
   res.status(200).type("text/xml").send(twiml);
 });
 
-// === client.html ausliefern (Test-Frontend für Browser-Calls) ===
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -80,7 +71,6 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "client.html"));
 });
 
-// === HTTP Server + Realtime-Server initialisieren ===
 const server = http.createServer(app);
 initRealtimeServer(server);
 
